@@ -24,6 +24,23 @@ pub use move_generation_trainer::{
 /// # Returns
 /// * A tuple containing the current player and a list of possible actions
 pub fn generate_possible_actions(state: &State) -> (usize, Vec<Action>) {
+    // If there are moves in the generation stack, short-circuit to that. This must be
+    // checked before the setup-phase branch below: forced follow-up decisions (e.g. a
+    // Legendary Drive switch-to-active offer from benching during setup, or a queued
+    // InitialHand draw) can be pushed while turn_count == 0, and must not be silently
+    // dropped by the setup-phase branch returning first.
+    if let Some((actor, possible_actions)) = state.move_generation_stack.last() {
+        let actions = possible_actions
+            .iter()
+            .map(|action| Action {
+                actor: *actor,
+                action: action.clone(),
+                is_stack: true,
+            })
+            .collect();
+        return (*actor, actions);
+    }
+
     let in_initial_setup_phase = state.turn_count == 0;
     if in_initial_setup_phase {
         let possible_actions = generate_initial_setup_actions(state)
@@ -35,19 +52,6 @@ pub fn generate_possible_actions(state: &State) -> (usize, Vec<Action>) {
             })
             .collect();
         return (state.current_player, possible_actions);
-    }
-
-    // If there are moves in the generation stack, short-circuit to that
-    if let Some((actor, possible_actions)) = state.move_generation_stack.last() {
-        let actions = possible_actions
-            .iter()
-            .map(|action| Action {
-                actor: *actor,
-                action: action.clone(),
-                is_stack: true,
-            })
-            .collect();
-        return (*actor, actions);
     }
 
     if state.end_turn_pending {

@@ -6,7 +6,8 @@ use rand::rngs::StdRng;
 use crate::{
     actions::{
         abilities::AbilityMechanic, ability_mechanic_from_effect,
-        effect_ability_mechanic_map::get_ability_mechanic, shared_mutations, SimpleAction,
+        effect_ability_mechanic_map::get_ability_mechanic, shared_mutations, DrawSource,
+        SimpleAction,
     },
     card_ids::CardId,
     effects::TurnEffect,
@@ -68,7 +69,7 @@ pub(crate) fn forecast_end_turn(state: &State) -> (Probabilities, Mutations) {
                 state.turn_count = 1;
                 state.end_turn_maintenance();
                 start_mutation(rng, state, action);
-                state.queue_draw_action(state.current_player, 1);
+                state.queue_draw_action(state.current_player, 1, DrawSource::TurnStart);
             }));
         }
 

@@ -241,7 +241,7 @@ fn forecast_apply_damage(
 
 fn apply_deterministic_action(state: &mut State, action: &Action) {
     match &action.action {
-        SimpleAction::DrawCard { amount } => {
+        SimpleAction::DrawCard { amount, .. } => {
             for _ in 0..*amount {
                 state.maybe_draw_card(action.actor);
             }

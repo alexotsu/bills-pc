@@ -31,4 +31,5 @@ pub use effect_ability_mechanic_map::has_ability_mechanic;
 pub use effect_ability_mechanic_map::EFFECT_ABILITY_MECHANIC_MAP;
 pub use effect_mechanic_map::EFFECT_MECHANIC_MAP;
 pub use types::Action;
+pub use types::DrawSource;
 pub use types::SimpleAction;

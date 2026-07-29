@@ -4,3 +4,5 @@ mod apply_actions_test;
 mod deck_test;
 #[path = "engine/game_api_test.rs"]
 mod game_api_test;
+#[path = "engine/interactive_test.rs"]
+mod interactive_test;

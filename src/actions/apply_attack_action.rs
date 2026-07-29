@@ -14,7 +14,7 @@ use crate::{
         attacks::{BenchSide, CopyAttackSource, Mechanic},
         effect_ability_mechanic_map::ability_mechanic_from_effect,
         effect_mechanic_map::EFFECT_MECHANIC_MAP,
-        Action,
+        Action, DrawSource,
     },
     combinatorics::generate_combinations,
     effects::{CardEffect, TurnEffect},
@@ -1948,9 +1948,13 @@ fn damage_and_both_active_multiple_status_attack(
 /// Draw cards and deal damage in the same attack.
 fn draw_and_damage_outcome(damage: u32, amount: u8) -> AttackOutcomes {
     active_damage_effect_doutcome(damage, move |_, state, action| {
-        state
-            .move_generation_stack
-            .push((action.actor, vec![SimpleAction::DrawCard { amount }]));
+        state.move_generation_stack.push((
+            action.actor,
+            vec![SimpleAction::DrawCard {
+                amount,
+                source: DrawSource::Attack,
+            }],
+        ));
     })
 }
 

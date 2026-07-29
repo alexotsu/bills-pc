@@ -10,7 +10,7 @@ use crate::{
         effect_ability_mechanic_map::ability_mechanic_from_effect,
         outcomes::Outcomes,
         shared_mutations::pokemon_search_outcomes,
-        Action, SimpleAction,
+        Action, DrawSource, SimpleAction,
     },
     effects::TurnEffect,
     hooks::is_ultra_beast,
@@ -727,7 +727,7 @@ fn umbreon_dark_chase(_: &mut StdRng, state: &mut State, action: &Action) {
 fn discard_from_hand_to_draw_card() -> Outcomes {
     Outcomes::single_fn(|_rng, state, action| {
         // Queue draw first (LIFO: will execute after the discard choice resolves)
-        state.queue_draw_action(action.actor, 1);
+        state.queue_draw_action(action.actor, 1, DrawSource::Ability);
         // Push discard choices (executed first since pushed last onto LIFO stack)
         let hand_cards: Vec<Card> = state.hands[action.actor].to_vec();
         let mut seen = std::collections::HashSet::new();

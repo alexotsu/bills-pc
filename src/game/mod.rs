@@ -1,3 +1,8 @@
+mod interactive;
+
+use interactive::SeatMode;
+pub use interactive::{InteractiveConfig, PendingDecision, SubmitError};
+
 use colored::Colorize;
 use log::{debug, info, trace};
 use rand::{rngs::StdRng, SeedableRng};
@@ -23,6 +28,10 @@ pub struct Game<'a> {
 
     debug: bool,
     event_handler: Option<&'a mut CompositeSimulationEventHandler>,
+
+    // Per-seat interactive control-plane config. Defaults to `Scripted`/`Scripted` (today's
+    // behavior, unchanged) for every constructor; opt in via `Game::set_interactive`.
+    interactive_seats: [SeatMode; 2],
 }
 
 impl<'a> Game<'a> {
@@ -36,6 +45,7 @@ impl<'a> Game<'a> {
             state,
             debug: false,
             event_handler: None,
+            interactive_seats: [SeatMode::Scripted, SeatMode::Scripted],
         }
     }
 
@@ -52,6 +62,7 @@ impl<'a> Game<'a> {
             state,
             debug: true,
             event_handler: None,
+            interactive_seats: [SeatMode::Scripted, SeatMode::Scripted],
         }
     }
 

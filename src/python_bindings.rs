@@ -6,10 +6,11 @@ use pyo3::wrap_pyfunction;
 use std::collections::HashMap;
 
 use crate::{
+    actions::Action,
     deck::Deck,
-    game::Game,
+    game::{Game, InteractiveConfig, PendingDecision},
     models::{Ability, Attack, Card, EnergyType, PlayedCard},
-    players::{create_players, fill_code_array, parse_player_code},
+    players::{create_players, fill_code_array, parse_player_code, InteractivePlayer, PlayerCode},
     state::{GameOutcome, State},
 };
 
@@ -687,6 +688,76 @@ impl PyState {
     }
 }
 
+/// Python wrapper for an `Action`
+#[pyclass]
+#[derive(Clone)]
+pub struct PyAction {
+    action: Action,
+}
+
+#[pymethods]
+impl PyAction {
+    #[getter]
+    fn actor(&self) -> usize {
+        self.action.actor
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.action.action)
+    }
+}
+
+impl From<Action> for PyAction {
+    fn from(action: Action) -> Self {
+        PyAction { action }
+    }
+}
+
+/// Python wrapper for `PendingDecision`, the next point in the game requiring external input.
+/// `kind` is one of `"awaiting_action"`, `"awaiting_draw"`, or `"game_over"`; the other fields
+/// are populated depending on `kind`.
+#[pyclass]
+pub struct PyPendingDecision {
+    #[pyo3(get)]
+    pub kind: String,
+    #[pyo3(get)]
+    pub actor: Option<usize>,
+    #[pyo3(get)]
+    pub actions: Option<Vec<PyAction>>,
+    #[pyo3(get)]
+    pub draw_source: Option<String>,
+    #[pyo3(get)]
+    pub outcome: Option<PyGameOutcome>,
+}
+
+impl From<PendingDecision> for PyPendingDecision {
+    fn from(decision: PendingDecision) -> Self {
+        match decision {
+            PendingDecision::AwaitingAction { actor, actions } => PyPendingDecision {
+                kind: "awaiting_action".to_string(),
+                actor: Some(actor),
+                actions: Some(actions.into_iter().map(PyAction::from).collect()),
+                draw_source: None,
+                outcome: None,
+            },
+            PendingDecision::AwaitingDraw { actor, source, .. } => PyPendingDecision {
+                kind: "awaiting_draw".to_string(),
+                actor: Some(actor),
+                actions: None,
+                draw_source: Some(format!("{source:?}")),
+                outcome: None,
+            },
+            PendingDecision::GameOver(outcome) => PyPendingDecision {
+                kind: "game_over".to_string(),
+                actor: None,
+                actions: None,
+                draw_source: None,
+                outcome: outcome.map(PyGameOutcome::from),
+            },
+        }
+    }
+}
+
 /// Python wrapper for Game
 #[pyclass(unsendable)]
 pub struct PyGame {
@@ -710,12 +781,22 @@ impl PyGame {
             PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("Failed to load deck B: {}", e))
         })?;
 
-        let player_codes = if let Some(player_strs) = players {
+        // "interactive" is a sentinel recognized only here (not by `parse_player_code`/the
+        // CLI): it maps to `InteractivePlayer` and auto-registers the seat via
+        // `set_interactive`, so a Python caller can drive that seat entirely through
+        // step()/submit_action()/submit_draw().
+        let mut interactive_seats = [false, false];
+        let player_codes = if let Some(player_strs) = &players {
             let mut codes = Vec::new();
-            for player_str in player_strs {
-                let code = parse_player_code(&player_str)
-                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-                codes.push(code);
+            for (i, player_str) in player_strs.iter().enumerate() {
+                if player_str.eq_ignore_ascii_case("interactive") {
+                    interactive_seats[i] = true;
+                    codes.push(PlayerCode::R); // placeholder, replaced with InteractivePlayer below
+                } else {
+                    let code = parse_player_code(player_str)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                    codes.push(code);
+                }
             }
             Some(codes)
         } else {
@@ -723,9 +804,21 @@ impl PyGame {
         };
 
         let cli_players = fill_code_array(player_codes);
-        let rust_players = create_players(deck_a, deck_b, cli_players);
+        let mut rust_players = create_players(deck_a.clone(), deck_b.clone(), cli_players);
+        if interactive_seats[0] {
+            rust_players[0] = Box::new(InteractivePlayer { deck: deck_a });
+        }
+        if interactive_seats[1] {
+            rust_players[1] = Box::new(InteractivePlayer { deck: deck_b });
+        }
+
         let game_seed = seed.unwrap_or_else(rand::random::<u64>);
-        let game = Game::new(rust_players, game_seed);
+        let mut game = Game::new(rust_players, game_seed);
+        for (seat, is_interactive) in interactive_seats.into_iter().enumerate() {
+            if is_interactive {
+                game.set_interactive(seat, InteractiveConfig::default());
+            }
+        }
 
         Ok(PyGame { game })
     }
@@ -745,6 +838,51 @@ impl PyGame {
         format!("{:?}", action.action)
     }
 
+    /// Marks `seat` (0 or 1) as interactive: its decisions pause for
+    /// step()/submit_action() instead of being driven by its `Player`. If `override_draws`
+    /// is true, the seat's TurnStart/InitialHand draws also pause for submit_draw().
+    fn set_interactive(&mut self, seat: usize, override_draws: bool) -> PyResult<()> {
+        check_seat(seat)?;
+        self.game
+            .set_interactive(seat, InteractiveConfig { override_draws });
+        Ok(())
+    }
+
+    /// Reverts `seat` (0 or 1) to being driven by its `Player`.
+    fn set_scripted(&mut self, seat: usize) -> PyResult<()> {
+        check_seat(seat)?;
+        self.game.set_scripted(seat);
+        Ok(())
+    }
+
+    fn is_interactive(&self, seat: usize) -> PyResult<bool> {
+        check_seat(seat)?;
+        Ok(self.game.is_interactive(seat))
+    }
+
+    /// Runs the game until the next point requiring external input (or game over).
+    fn step(&mut self) -> PyPendingDecision {
+        self.game.step().into()
+    }
+
+    /// Resolves an `AwaitingAction` decision with a chosen `PyAction`.
+    fn submit_action(&mut self, action: &PyAction) -> PyResult<PyPendingDecision> {
+        self.game
+            .submit_action(action.action.clone())
+            .map(PyPendingDecision::from)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Resolves an `AwaitingDraw` decision. `card=None` draws normally (top of deck);
+    /// `card=<PyCard>` forces that specific card to be drawn instead.
+    #[pyo3(signature = (card=None))]
+    fn submit_draw(&mut self, card: Option<PyCard>) -> PyResult<PyPendingDecision> {
+        self.game
+            .submit_draw(card.map(|c| c.card))
+            .map(PyPendingDecision::from)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
     fn __repr__(&self) -> String {
         let state = self.game.get_state_clone();
         format!(
@@ -754,6 +892,15 @@ impl PyGame {
             state.is_game_over()
         )
     }
+}
+
+fn check_seat(seat: usize) -> PyResult<()> {
+    if seat > 1 {
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "seat must be 0 or 1",
+        ));
+    }
+    Ok(())
 }
 
 /// Simulation results
@@ -883,6 +1030,8 @@ pub fn deckgym(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPlayedCard>()?;
     m.add_class::<PyDeck>()?;
     m.add_class::<PyGame>()?;
+    m.add_class::<PyAction>()?;
+    m.add_class::<PyPendingDecision>()?;
     m.add_class::<PyState>()?;
     m.add_class::<PyGameOutcome>()?;
     m.add_class::<PySimulationResults>()?;

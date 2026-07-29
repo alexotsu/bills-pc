@@ -100,7 +100,7 @@ The JSON format makes it easy to:
 
 ## Contributing
 
-New to Open Source? See [CONTRIBUTING.md](./CONTRIBUTING.md).
+New to Open Source? See [CONTRIBUTING.md](./CONTRIBUTING.md). See [CHANGELOG.md](./CHANGELOG.md) for a history of notable changes.
 
 The main contribution is to implement more cards, basically their attack and abilities logic. This makes the cards eligible for simulation and thus available for use in https://www.deckgym.com.
 

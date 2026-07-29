@@ -10,7 +10,7 @@ use std::hash::Hash;
 
 use crate::{
     actions::abilities::AbilityMechanic,
-    actions::{has_ability_mechanic, SimpleAction},
+    actions::{has_ability_mechanic, DrawSource, SimpleAction},
     deck::Deck,
     effects::TurnEffect,
     models::{Card, EnergyType, StatusCondition},
@@ -172,9 +172,27 @@ impl State {
         for deck in &mut state.decks {
             deck.shuffle(true, rng);
         }
+        // Queue the 10 opening-hand draws instead of drawing them synchronously, so an
+        // interactive seat can override any of them once `Game::new` returns (via the
+        // normal tick loop, same as any other queued `DrawCard`). `move_generation_stack`
+        // is LIFO, so push player 1 then player 0 each round: the last-pushed (player 0's
+        // final round) pops first, yielding resolution order [0,1,0,1,0,1,0,1,0,1] -
+        // identical to the old synchronous loop's draw order.
         for _ in 0..5 {
-            state.maybe_draw_card(0);
-            state.maybe_draw_card(1);
+            state.move_generation_stack.push((
+                1,
+                vec![SimpleAction::DrawCard {
+                    amount: 1,
+                    source: DrawSource::InitialHand,
+                }],
+            ));
+            state.move_generation_stack.push((
+                0,
+                vec![SimpleAction::DrawCard {
+                    amount: 1,
+                    source: DrawSource::InitialHand,
+                }],
+            ));
         }
         // Flip a coin to determine the starting player
         state.current_player = rng.gen_range(0..2);
@@ -210,6 +228,27 @@ impl State {
             .position(|c| c == card)
             .expect("Evolution card should be in deck");
         self.decks[player].cards.remove(pos);
+    }
+
+    /// Reorders `player`'s deck so `card` is drawn next, without otherwise touching the
+    /// deck's order. Used by the interactive control plane (`Game::submit_draw`) to let a
+    /// caller override which card a queued `DrawCard` action resolves to; the normal
+    /// `apply_action -> maybe_draw_card -> Deck::draw` pipeline then runs unmodified.
+    /// Fallible (unlike `remove_card_from_deck`'s `.expect(...)`) because its only caller is
+    /// externally-driven — a bad request from outside the engine must not panic.
+    pub(crate) fn move_card_to_front_of_deck(
+        &mut self,
+        player: usize,
+        card: &Card,
+    ) -> Result<(), ()> {
+        let pos = self.decks[player]
+            .cards
+            .iter()
+            .position(|c| c == card)
+            .ok_or(())?;
+        let card = self.decks[player].cards.remove(pos);
+        self.decks[player].cards.insert(0, card);
+        Ok(())
     }
 
     pub(crate) fn discard_card_from_hand(&mut self, current_player: usize, card: &Card) {
@@ -398,9 +437,9 @@ impl State {
             .filter(|(i, _)| *i != 0)
     }
 
-    pub(crate) fn queue_draw_action(&mut self, actor: usize, amount: u8) {
+    pub(crate) fn queue_draw_action(&mut self, actor: usize, amount: u8, source: DrawSource) {
         self.move_generation_stack
-            .push((actor, vec![SimpleAction::DrawCard { amount }]));
+            .push((actor, vec![SimpleAction::DrawCard { amount, source }]));
     }
 
     pub fn maybe_get_active(&self, player: usize) -> Option<&PlayedCard> {
@@ -487,7 +526,7 @@ impl State {
             return;
         }
         self.end_turn_maintenance();
-        self.queue_draw_action(self.current_player, 1);
+        self.queue_draw_action(self.current_player, 1, DrawSource::TurnStart);
         self.rotate_energy_zone(self.current_player, rng);
     }
 
@@ -698,9 +737,14 @@ fn roll_energy(deck: &Deck, rng: &mut impl Rng) -> EnergyType {
 #[cfg(test)]
 mod tests {
     use crate::{
-        card_ids::CardId, database::get_card_by_enum, deck::is_basic, hooks::to_playable_card,
+        actions::{apply_action, Action},
+        card_ids::CardId,
+        database::get_card_by_enum,
+        deck::is_basic,
+        hooks::to_playable_card,
         test_support::load_test_decks,
     };
+    use rand::SeedableRng;
 
     use super::*;
 
@@ -721,7 +765,20 @@ mod tests {
     #[test]
     fn test_players_start_with_five_cards_one_of_which_is_basic() {
         let (deck_a, deck_b) = load_test_decks();
-        let state = State::initialize(&deck_a, &deck_b, &mut rand::thread_rng());
+        let mut state = State::initialize(&deck_a, &deck_b, &mut rand::thread_rng());
+
+        // The 10 opening-hand draws are queued (DrawSource::InitialHand) rather than
+        // resolved synchronously; drain them (DrawCard never actually samples the rng
+        // passed to apply_action, so a throwaway StdRng here is safe).
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        while let Some((actor, actions)) = state.move_generation_stack.last().cloned() {
+            let action = Action {
+                actor,
+                action: actions[0].clone(),
+                is_stack: true,
+            };
+            apply_action(&mut rng, &mut state, &action);
+        }
 
         assert_eq!(state.hands[0].len(), 5);
         assert_eq!(state.hands[1].len(), 5);

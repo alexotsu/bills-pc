@@ -11,10 +11,31 @@ pub struct Action {
     pub is_stack: bool,
 }
 
+/// Tags *why* a `SimpleAction::DrawCard` was queued, so the interactive
+/// control plane (see `Game::step`/`submit_draw`) can decide whether a given
+/// draw is eligible for override. To add a new interceptable draw source:
+/// add a variant here and tag its one construction site with it. No other
+/// code needs to change unless that source should also become interceptable
+/// (see `Game::wants_draw_override`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DrawSource {
+    /// The 5-card opening hand dealt before turn 1.
+    InitialHand,
+    /// The single card drawn at the start of a turn (including the very
+    /// first turn's draw, at the setup→turn-1 transition).
+    TurnStart,
+    /// A draw granted by a Pokémon ability (e.g. Legendary Pulse, evolve-draw
+    /// abilities, discard-to-draw abilities). Not yet interceptable.
+    Ability,
+    /// A draw granted directly by an attack effect. Not yet interceptable.
+    Attack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SimpleAction {
     DrawCard {
         amount: u8,
+        source: DrawSource,
     },
     Play {
         trainer_card: TrainerCard,
@@ -166,7 +187,9 @@ pub enum SimpleAction {
 impl fmt::Display for SimpleAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SimpleAction::DrawCard { amount } => write!(f, "DrawCard({amount})"),
+            SimpleAction::DrawCard { amount, source } => {
+                write!(f, "DrawCard({amount}, {source:?})")
+            }
             SimpleAction::Play { trainer_card } => write!(f, "Play({trainer_card:?})"),
             SimpleAction::Place(card, index) => write!(f, "Place({card}, {index})"),
             SimpleAction::Evolve {

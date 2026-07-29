@@ -1,10 +1,15 @@
 use crate::{
     actions::{Action, SimpleAction},
+    models::Card,
     players::{create_players, Player, PlayerCode},
     Deck, Game, State,
 };
 use rand::{thread_rng, Rng};
 use std::error::Error;
+
+/// How many items (actions or draw candidates) are shown, and selectable via keys 1-9, on one
+/// page. Lists longer than this are paged through with PageUp/PageDown rather than truncated.
+pub(crate) const ITEMS_PER_PAGE: usize = 9;
 
 pub enum AppMode {
     Replay {
@@ -18,6 +23,21 @@ pub enum AppMode {
         possible_actions: Vec<Action>,
         action_history: Vec<Action>, // Track actions as they happen
         turn_history: Vec<u8>,       // Track turn number when each action was taken
+        // Full state snapshot taken immediately *before* each entry in `action_history` was
+        // applied (same length, same indices). Powers `App::undo`: popping the last snapshot
+        // and restoring it rolls the game back one action at a time — human or bot — so a
+        // misclick can be undone by pressing undo until you're back before it.
+        state_history: Vec<State>,
+        // Which seats are human-controlled (`--players` code `h`), derived once at
+        // construction. Any number of seats can be human — including both, for local
+        // hot-seat play. A seat that isn't human auto-plays through its own `Player`
+        // exactly like bulk simulation; a human seat always pauses for a click.
+        human_seats: [bool; 2],
+        // If true, human seats' forced single-card draws (opening hand + turn-start) pause
+        // for a card pick instead of resolving automatically.
+        draw_override_enabled: bool,
+        // Some(candidates) when the current human seat must pick which card to draw next.
+        draw_choice: Option<Vec<Card>>,
     },
 }
 
@@ -33,6 +53,9 @@ pub struct App {
     pub player_hand_scroll: usize,
     pub opponent_hand_scroll: usize,
     pub lock_actions_center: bool,
+    // Which page of the current action/draw-choice list is shown (see `ITEMS_PER_PAGE`).
+    // Reset to 0 whenever a new list is presented (a new decision, or after undo).
+    pub action_page: usize,
 }
 
 fn action_priority_for_tui(action: &SimpleAction) -> u8 {
@@ -59,19 +82,56 @@ fn sort_actions_for_tui(actions: &mut Vec<Action>) {
         .collect();
 }
 
+/// If `actor`'s only legal move is a forced single-card draw and draw override is enabled,
+/// returns the candidate cards to offer instead of letting it auto-resolve. `actor_is_human`
+/// gates this: a non-human (bot) seat's draws always auto-resolve regardless of the flag. All
+/// remaining deck cards are returned (not capped to one page) — `ITEMS_PER_PAGE`-based paging
+/// (PageUp/PageDown) handles showing/selecting from lists longer than one page.
+fn maybe_offer_draw_choice(
+    game: &Game,
+    actor: usize,
+    actor_is_human: bool,
+    possible_actions: &[Action],
+    draw_override_enabled: bool,
+) -> Option<Vec<Card>> {
+    if !actor_is_human || !draw_override_enabled {
+        return None;
+    }
+    let [action] = possible_actions else {
+        return None;
+    };
+    if !matches!(action.action, SimpleAction::DrawCard { .. }) {
+        return None;
+    }
+    let state = game.get_state_clone();
+    if state.decks[actor].cards.is_empty() {
+        // Nothing to choose between; let it auto-resolve (a no-op draw) instead of showing an
+        // empty picker.
+        return None;
+    }
+    Some(state.decks[actor].cards.clone())
+}
+
 impl App {
     pub fn new(
         deck_a_path: &str,
         deck_b_path: &str,
         player_codes: Vec<PlayerCode>,
         seed: Option<u64>,
+        draw_override_enabled: bool,
     ) -> Result<App, Box<dyn Error>> {
         // Load decks from files
         let deck_a = Deck::from_file(deck_a_path)?;
         let deck_b = Deck::from_file(deck_b_path)?;
 
-        // Detect if any player is human
-        let has_human = player_codes.contains(&PlayerCode::H);
+        // Detect which seats (if any) are human-controlled. Any number of seats can be human
+        // (including both, for local hot-seat play) — a seat auto-plays through its own
+        // `Player` unless its code is `h`.
+        let human_seats = [
+            player_codes.first() == Some(&PlayerCode::H),
+            player_codes.get(1) == Some(&PlayerCode::H),
+        ];
+        let has_human = human_seats.contains(&true);
 
         // Use provided seed or generate a random one
         let seed = seed.unwrap_or_else(|| {
@@ -80,7 +140,7 @@ impl App {
         });
 
         let mode = if has_human {
-            // Interactive mode - create live game
+            // Interactive mode - create live game.
             let players: Vec<Box<dyn Player>> = create_players(deck_a, deck_b, player_codes);
             let game = Box::new(Game::new(players, seed));
 
@@ -88,6 +148,13 @@ impl App {
             let (current_actor, mut possible_actions) =
                 game.get_state_clone().generate_possible_actions();
             sort_actions_for_tui(&mut possible_actions);
+            let draw_choice = maybe_offer_draw_choice(
+                &game,
+                current_actor,
+                human_seats[current_actor],
+                &possible_actions,
+                draw_override_enabled,
+            );
 
             AppMode::Interactive {
                 game,
@@ -95,6 +162,10 @@ impl App {
                 possible_actions,
                 action_history: vec![],
                 turn_history: vec![],
+                state_history: vec![],
+                human_seats,
+                draw_override_enabled,
+                draw_choice,
             }
         } else {
             // Replay mode - pre-compute entire game
@@ -125,6 +196,7 @@ impl App {
             player_hand_scroll: 0,
             opponent_hand_scroll: 0,
             lock_actions_center: true,
+            action_page: 0,
         })
     }
 
@@ -356,7 +428,8 @@ impl App {
     }
 
     pub fn scroll_player_hand_right(&mut self) {
-        let player_hand_size = self.get_state().hands[1].len();
+        let bottom_seat = self.bottom_seat();
+        let player_hand_size = self.get_state().hands[bottom_seat].len();
         if self.player_hand_scroll < player_hand_size.saturating_sub(5) {
             self.player_hand_scroll += 1;
         }
@@ -367,24 +440,62 @@ impl App {
     }
 
     pub fn scroll_opponent_hand_right(&mut self) {
-        let opponent_hand_size = self.get_state().hands[0].len();
+        let top_seat = 1 - self.bottom_seat();
+        let opponent_hand_size = self.get_state().hands[top_seat].len();
         if self.opponent_hand_scroll < opponent_hand_size.saturating_sub(5) {
             self.opponent_hand_scroll += 1;
         }
     }
 
     // Interactive mode methods
+    /// `index` is a 0-based position *within the current page* (i.e. what key "1"-"9" means on
+    /// screen); it's translated to an absolute index into the full list before being recorded.
     pub fn handle_action_selection(&mut self, index: usize) {
         if let AppMode::Interactive {
-            possible_actions, ..
+            possible_actions,
+            draw_choice,
+            ..
         } = &self.mode
         {
-            if index < possible_actions.len() {
+            let count = draw_choice
+                .as_ref()
+                .map_or(possible_actions.len(), |candidates| candidates.len());
+            let absolute_index = self.action_page * ITEMS_PER_PAGE + index;
+            if absolute_index < count {
                 self.selection_state = SelectionState::ActionSelected {
-                    action_index: index,
+                    action_index: absolute_index,
                 };
             }
         }
+    }
+
+    /// Total number of items in whichever list (actions or draw candidates) is currently up
+    /// for selection. 0 outside of a human's turn.
+    fn current_selectable_count(&self) -> usize {
+        match &self.mode {
+            AppMode::Interactive {
+                possible_actions,
+                draw_choice,
+                ..
+            } => draw_choice
+                .as_ref()
+                .map_or(possible_actions.len(), |candidates| candidates.len()),
+            AppMode::Replay { .. } => 0,
+        }
+    }
+
+    /// Moves to the next page of the current action/draw-choice list, if there is one. See
+    /// `ITEMS_PER_PAGE`.
+    pub fn next_action_page(&mut self) {
+        let total = self.current_selectable_count();
+        let max_page = total.saturating_sub(1) / ITEMS_PER_PAGE;
+        if self.action_page < max_page {
+            self.action_page += 1;
+        }
+    }
+
+    pub fn prev_action_page(&mut self) {
+        self.action_page = self.action_page.saturating_sub(1);
     }
 
     pub fn tick_game(&mut self) {
@@ -392,23 +503,45 @@ impl App {
             game,
             current_actor,
             possible_actions,
+            draw_choice,
+            human_seats,
+            draw_override_enabled,
             action_history,
             turn_history,
+            state_history,
         } = &mut self.mode
         {
             match &self.selection_state {
                 SelectionState::ActionSelected { action_index } => {
-                    // Record current turn before applying action
-                    let current_turn = game.get_state_clone().turn_count;
+                    let state_before = game.get_state_clone();
+                    let current_turn = state_before.turn_count;
 
-                    // Apply the selected action
-                    let action = possible_actions[*action_index].clone();
-                    action_history.push(action.clone());
-                    turn_history.push(current_turn);
-                    game.apply_action(&action);
+                    if let Some(candidates) = draw_choice.take() {
+                        // Resolve the deciding seat's draw pick: reorder its deck so the
+                        // chosen card is drawn next, then apply the already-queued DrawCard
+                        // action normally (hand-cap check and all run completely unmodified).
+                        let card = candidates[*action_index].clone();
+                        let draw_action = possible_actions[0].clone();
+                        let mut state = state_before.clone();
+                        state
+                            .move_card_to_front_of_deck(*current_actor, &card)
+                            .expect("a listed candidate should always be in the deck");
+                        game.set_state(state);
+                        action_history.push(draw_action.clone());
+                        turn_history.push(current_turn);
+                        state_history.push(state_before);
+                        game.apply_action(&draw_action);
+                    } else {
+                        let action = possible_actions[*action_index].clone();
+                        action_history.push(action.clone());
+                        turn_history.push(current_turn);
+                        state_history.push(state_before);
+                        game.apply_action(&action);
+                    }
 
                     // Reset selection state
                     self.selection_state = SelectionState::AwaitingActionSelection;
+                    self.action_page = 0;
 
                     // Refresh game state and possible actions for next turn
                     let (new_actor, mut new_actions) =
@@ -416,17 +549,20 @@ impl App {
                     sort_actions_for_tui(&mut new_actions);
                     *current_actor = new_actor;
                     *possible_actions = new_actions;
+                    *draw_choice = None;
                 }
                 SelectionState::AwaitingActionSelection => {
-                    // If it's AI's turn, play automatically
-                    if *current_actor == 0 {
-                        // Record current turn before AI plays
-                        let current_turn = game.get_state_clone().turn_count;
+                    if !human_seats[*current_actor] {
+                        // Record current turn before the bot plays
+                        let state_before = game.get_state_clone();
+                        let current_turn = state_before.turn_count;
 
-                        // AI turn (player 0)
+                        // Non-human seat: driven by its own configured Player, exactly like
+                        // bulk simulation.
                         let action = game.play_tick();
                         action_history.push(action);
                         turn_history.push(current_turn);
+                        state_history.push(state_before);
 
                         // Refresh for next turn
                         let (new_actor, mut new_actions) =
@@ -434,10 +570,91 @@ impl App {
                         sort_actions_for_tui(&mut new_actions);
                         *current_actor = new_actor;
                         *possible_actions = new_actions;
+                        self.action_page = 0;
+                    } else if draw_choice.is_none() {
+                        if let Some(candidates) = maybe_offer_draw_choice(
+                            game,
+                            *current_actor,
+                            human_seats[*current_actor],
+                            possible_actions,
+                            *draw_override_enabled,
+                        ) {
+                            // Offer this seat's human a card pick instead of auto-resolving.
+                            *draw_choice = Some(candidates);
+                            self.action_page = 0;
+                        } else if possible_actions.len() == 1 {
+                            // Forced single action (non-draw, or draw override disabled):
+                            // auto-apply, matching HumanPlayer's own "only one option, just
+                            // take it" convention.
+                            let state_before = game.get_state_clone();
+                            let current_turn = state_before.turn_count;
+                            let action = possible_actions[0].clone();
+                            action_history.push(action.clone());
+                            turn_history.push(current_turn);
+                            state_history.push(state_before);
+                            game.apply_action(&action);
+
+                            let (new_actor, mut new_actions) =
+                                game.get_state_clone().generate_possible_actions();
+                            sort_actions_for_tui(&mut new_actions);
+                            *current_actor = new_actor;
+                            *possible_actions = new_actions;
+                            self.action_page = 0;
+                        }
+                        // else: multiple choices, wait for human input
                     }
-                    // Otherwise wait for human input
+                    // else: already offering a draw choice, wait for human input
                 }
             }
+        }
+    }
+
+    /// Whether there's a recorded action to roll back to. Always false in Replay mode (use
+    /// Up/Down to navigate a replay instead) or before anything has happened yet.
+    pub fn can_undo(&self) -> bool {
+        match &self.mode {
+            AppMode::Replay { .. } => false,
+            AppMode::Interactive { state_history, .. } => !state_history.is_empty(),
+        }
+    }
+
+    /// Rolls the live game back to the state immediately before the last applied action —
+    /// human or bot, whichever happened most recently — undoing exactly one step. Press
+    /// repeatedly to walk further back, e.g. past an opponent's move that landed in between a
+    /// misclick and the undo key press. A no-op if `can_undo()` is false.
+    pub fn undo(&mut self) {
+        if let AppMode::Interactive {
+            game,
+            current_actor,
+            possible_actions,
+            draw_choice,
+            human_seats,
+            draw_override_enabled,
+            action_history,
+            turn_history,
+            state_history,
+        } = &mut self.mode
+        {
+            let Some(previous_state) = state_history.pop() else {
+                return;
+            };
+            action_history.pop();
+            turn_history.pop();
+            game.set_state(previous_state);
+            self.selection_state = SelectionState::AwaitingActionSelection;
+            self.action_page = 0;
+
+            let (new_actor, mut new_actions) = game.get_state_clone().generate_possible_actions();
+            sort_actions_for_tui(&mut new_actions);
+            *draw_choice = maybe_offer_draw_choice(
+                game,
+                new_actor,
+                human_seats[new_actor],
+                &new_actions,
+                *draw_override_enabled,
+            );
+            *current_actor = new_actor;
+            *possible_actions = new_actions;
         }
     }
 
@@ -465,6 +682,15 @@ impl App {
         }
     }
 
+    /// Some(candidates) when the human must currently pick which card to draw next (see
+    /// `--override-draws`). Never populated in Replay mode.
+    pub fn get_draw_choice(&self) -> Option<&[Card]> {
+        match &self.mode {
+            AppMode::Replay { .. } => None,
+            AppMode::Interactive { draw_choice, .. } => draw_choice.as_deref(),
+        }
+    }
+
     pub fn get_current_actor(&self) -> usize {
         match &self.mode {
             AppMode::Replay {
@@ -473,6 +699,48 @@ impl App {
                 ..
             } => states[*current_index].generate_possible_actions().0,
             AppMode::Interactive { current_actor, .. } => *current_actor,
+        }
+    }
+
+    /// Whether the seat currently deciding is human-controlled (i.e. should wait for a key
+    /// press rather than auto-play). Always false in Replay mode.
+    pub fn is_current_actor_human(&self) -> bool {
+        match &self.mode {
+            AppMode::Replay { .. } => false,
+            AppMode::Interactive {
+                current_actor,
+                human_seats,
+                ..
+            } => human_seats[*current_actor],
+        }
+    }
+
+    /// The seat rendered at the bottom of the board (the "your side" position, nearest the
+    /// hand panel you click cards from). If exactly one seat is human, that seat is always
+    /// shown at the bottom regardless of whether it's seat 0 or seat 1 — so your own board is
+    /// always in the same place whether you're `--players h,r` or `--players r,h`. Falls back
+    /// to seat 1 when both or neither seat is human (hot-seat play, or Replay mode), matching
+    /// this TUI's original fixed layout.
+    pub fn bottom_seat(&self) -> usize {
+        match &self.mode {
+            AppMode::Replay { .. } => 1,
+            AppMode::Interactive { human_seats, .. } => {
+                if human_seats[0] && !human_seats[1] {
+                    0
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    /// Whether `seat`'s hand should be rendered face-up. Human seats are always revealed (it's
+    /// your own hand); in Replay mode only the bottom seat is revealed, matching this TUI's
+    /// original single-perspective convention.
+    pub fn is_hand_revealed(&self, seat: usize) -> bool {
+        match &self.mode {
+            AppMode::Replay { .. } => seat == self.bottom_seat(),
+            AppMode::Interactive { human_seats, .. } => human_seats[seat],
         }
     }
 
@@ -507,10 +775,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_actions_for_tui;
+    use super::{sort_actions_for_tui, App, AppMode, SelectionState, ITEMS_PER_PAGE};
     use crate::{
         actions::{Action, SimpleAction},
         models::{Attack, Card, EnergyType, PokemonCard, TrainerCard, TrainerType},
+        players::PlayerCode,
     };
 
     fn action(action: SimpleAction) -> Action {
@@ -580,5 +849,292 @@ mod tests {
         assert!(matches!(actions[4].action, SimpleAction::Attack(_)));
         assert!(matches!(actions[5].action, SimpleAction::Retreat(_)));
         assert!(matches!(actions[6].action, SimpleAction::EndTurn));
+    }
+
+    /// Headless functional test for `--override-draws`: drives a live `App` purely through its
+    /// public methods (`tick_game`/`handle_action_selection`), the same calls the real key-press
+    /// loop in `src/bin/tui.rs` makes, and confirms the human seat gets offered at least one
+    /// draw choice and that picking one resolves it.
+    #[test]
+    fn test_draw_override_flow_lets_human_pick_a_card_to_draw() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::R, PlayerCode::H],
+            Some(7),
+            true, // override_draws
+        )
+        .expect("App::new should succeed");
+
+        let mut saw_draw_choice = false;
+        let mut resolved_a_draw_choice = false;
+
+        for _ in 0..2_000 {
+            if app.is_game_over() {
+                break;
+            }
+
+            if let Some(candidates) = app.get_draw_choice() {
+                assert!(
+                    !candidates.is_empty(),
+                    "draw choice should offer at least one candidate"
+                );
+                saw_draw_choice = true;
+                app.handle_action_selection(0);
+                app.tick_game();
+                if app.get_draw_choice().is_none() {
+                    resolved_a_draw_choice = true;
+                }
+                continue;
+            }
+
+            // Only click when there's a genuine choice: a single legal action is left alone
+            // so `tick_game` gets to auto-resolve it (or, for a human draw, offer a card pick)
+            // on its own — exactly like the real key-press loop, where no key press happens
+            // for forced single-choice steps.
+            let possible_actions = app.get_possible_actions();
+            if app.is_current_actor_human() && possible_actions.len() > 1 {
+                app.handle_action_selection(0);
+            }
+            app.tick_game();
+        }
+
+        assert!(
+            saw_draw_choice,
+            "the human seat should have been offered at least one draw choice"
+        );
+        assert!(
+            resolved_a_draw_choice,
+            "picking a draw candidate should resolve the draw and clear draw_choice"
+        );
+    }
+
+    /// Without `--override-draws`, the human seat's draws must keep resolving automatically
+    /// (matching pre-existing behavior) instead of ever pausing for a card pick.
+    #[test]
+    fn test_draw_choice_never_offered_when_override_disabled() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::R, PlayerCode::H],
+            Some(7),
+            false, // override_draws
+        )
+        .expect("App::new should succeed");
+
+        for _ in 0..2_000 {
+            if app.is_game_over() {
+                break;
+            }
+            assert!(
+                app.get_draw_choice().is_none(),
+                "draw choice should never be offered when override_draws is disabled"
+            );
+
+            // Only click when there's a genuine choice: a single legal action is left alone
+            // so `tick_game` gets to auto-resolve it (or, for a human draw, offer a card pick)
+            // on its own — exactly like the real key-press loop, where no key press happens
+            // for forced single-choice steps.
+            let possible_actions = app.get_possible_actions();
+            if app.is_current_actor_human() && possible_actions.len() > 1 {
+                app.handle_action_selection(0);
+            }
+            app.tick_game();
+        }
+    }
+
+    /// Sanity check that `AppMode::Interactive` is actually what `App::new` produces when a
+    /// human player code is present (the mode `tick_game`/draw override logic requires).
+    #[test]
+    fn test_human_player_code_selects_interactive_mode() {
+        let app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::R, PlayerCode::H],
+            Some(7),
+            true,
+        )
+        .expect("App::new should succeed");
+
+        assert!(matches!(app.mode, AppMode::Interactive { .. }));
+    }
+
+    /// `--players h,h` (both seats human) must be drivable end-to-end purely through clicks —
+    /// no seat should ever fall through to a bot `Player::decision_fn` (which for `h` is
+    /// `HumanPlayer`, whose `decision_fn` blocks on stdin and would hang a real TUI session).
+    #[test]
+    fn test_both_seats_human_plays_via_clicks_only() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::H, PlayerCode::H],
+            Some(7),
+            true, // override_draws
+        )
+        .expect("App::new should succeed");
+
+        let mut saw_actor_0_turn = false;
+        let mut saw_actor_1_turn = false;
+
+        for _ in 0..2_000 {
+            if app.is_game_over() {
+                break;
+            }
+            assert!(
+                app.is_current_actor_human(),
+                "every decision should belong to a human seat when both players are `h`"
+            );
+            match app.get_current_actor() {
+                0 => saw_actor_0_turn = true,
+                1 => saw_actor_1_turn = true,
+                other => panic!("unexpected actor {other}"),
+            }
+
+            if let Some(candidates) = app.get_draw_choice() {
+                if !candidates.is_empty() {
+                    app.handle_action_selection(0);
+                }
+                app.tick_game();
+                continue;
+            }
+
+            let possible_actions = app.get_possible_actions();
+            if possible_actions.len() > 1 {
+                app.handle_action_selection(0);
+            }
+            app.tick_game();
+        }
+
+        assert!(
+            saw_actor_0_turn,
+            "seat 0 should have taken at least one turn"
+        );
+        assert!(
+            saw_actor_1_turn,
+            "seat 1 should have taken at least one turn"
+        );
+    }
+
+    #[test]
+    fn test_undo_reverts_state_history_and_action_history_together() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::R, PlayerCode::H],
+            Some(7),
+            false,
+        )
+        .expect("App::new should succeed");
+
+        assert!(
+            !app.can_undo(),
+            "nothing has happened yet, there should be nothing to undo"
+        );
+
+        // Advance a few steps (mix of bot auto-play and human single-choice auto-applies).
+        for _ in 0..5 {
+            app.tick_game();
+        }
+        assert!(app.can_undo(), "several actions have been applied by now");
+
+        let state_before_undo = app.get_state();
+        let actions_before_undo = app.get_actions();
+        assert!(!actions_before_undo.is_empty());
+
+        app.undo();
+
+        let state_after_undo = app.get_state();
+        let actions_after_undo = app.get_actions();
+        assert_eq!(
+            actions_after_undo.len(),
+            actions_before_undo.len() - 1,
+            "undo should remove exactly the last recorded action"
+        );
+        assert_eq!(
+            actions_after_undo,
+            actions_before_undo[..actions_before_undo.len() - 1],
+            "remaining action history should be an unmodified prefix of the original"
+        );
+        assert_ne!(
+            state_after_undo, state_before_undo,
+            "the game state should have actually changed"
+        );
+
+        // Undoing repeatedly should keep unwinding, then become a no-op once history is empty.
+        while app.can_undo() {
+            app.undo();
+        }
+        assert!(app.get_actions().is_empty());
+        let state_at_start = app.get_state();
+        app.undo(); // no-op: nothing left to undo
+        assert_eq!(
+            app.get_state(),
+            state_at_start,
+            "undo with empty history should not change anything"
+        );
+    }
+
+    /// Regression test: lists longer than 9 items (a fresh 20-card deck's draw candidates,
+    /// well before any pagination existed) used to be silently truncated with no way to reach
+    /// items past #9. Confirms paging changes which absolute item key "1"-"9" selects.
+    #[test]
+    fn test_draw_choice_paging_reaches_items_past_page_one() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::R, PlayerCode::H],
+            Some(7),
+            true, // override_draws
+        )
+        .expect("App::new should succeed");
+
+        // Drive to the first draw choice offered to the human (their first InitialHand draw).
+        for _ in 0..100 {
+            if app.get_draw_choice().is_some() {
+                break;
+            }
+            app.tick_game();
+        }
+        let candidates = app
+            .get_draw_choice()
+            .expect("test setup: should have reached a draw choice")
+            .to_vec();
+        assert!(
+            candidates.len() > ITEMS_PER_PAGE,
+            "test setup: a fresh 20-card deck should offer more than one page of candidates"
+        );
+        assert_eq!(app.action_page, 0, "should start on the first page");
+
+        app.prev_action_page();
+        assert_eq!(
+            app.action_page, 0,
+            "paging before the first page should be a no-op"
+        );
+
+        app.next_action_page();
+        assert_eq!(
+            app.action_page, 1,
+            "should have advanced to the second page"
+        );
+
+        // Key "3" on page 2 should resolve to absolute index 1*9 + 2 = 11, not 2.
+        app.handle_action_selection(2);
+        assert!(matches!(
+            app.selection_state,
+            SelectionState::ActionSelected { action_index: 11 }
+        ));
+
+        app.tick_game();
+        let expected_card = &candidates[11];
+        assert!(
+            app.get_state().hands[1].contains(expected_card),
+            "the card at absolute index 11 (page 2, key 3) should have been drawn"
+        );
+
+        // The page resets once the choice is resolved and a new decision is presented.
+        assert_eq!(
+            app.action_page, 0,
+            "action_page should reset back to 0 for the next decision"
+        );
     }
 }

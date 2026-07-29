@@ -5,7 +5,7 @@ use log::debug;
 
 use crate::{
     actions::{
-        abilities::AbilityMechanic, ability_mechanic_from_effect, get_ability_mechanic,
+        abilities::AbilityMechanic, ability_mechanic_from_effect, get_ability_mechanic, DrawSource,
         SimpleAction,
     },
     card_ids::CardId,
@@ -127,6 +127,7 @@ pub(crate) fn on_evolve(actor: usize, state: &mut State, to_card: &Card, from_ha
                 vec![
                     SimpleAction::DrawCard {
                         amount: *amount as u8,
+                        source: DrawSource::Ability,
                     },
                     SimpleAction::Noop,
                 ],
@@ -247,7 +248,10 @@ pub(crate) fn on_end_turn(player_ending_turn: usize, state: &mut State) {
             debug!("Legendary Pulse: Drawing a card");
             state.move_generation_stack.push((
                 player_ending_turn,
-                vec![SimpleAction::DrawCard { amount: 1 }],
+                vec![SimpleAction::DrawCard {
+                    amount: 1,
+                    source: DrawSource::Ability,
+                }],
             ));
         }
         if let AbilityMechanic::EndTurnHealSelfIfActive { amount } = mechanic {

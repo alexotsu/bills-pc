@@ -502,7 +502,7 @@ fn test_sylveon_ex_happy_ribbon_draws_two_on_evolve() {
     });
 
     let draw_action = find_action(&game, |a| {
-        matches!(a.action, SimpleAction::DrawCard { amount: 2 })
+        matches!(a.action, SimpleAction::DrawCard { amount: 2, .. })
     });
     game.apply_action(&draw_action);
     game.play_until_stable();

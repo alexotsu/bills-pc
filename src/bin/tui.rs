@@ -34,6 +34,11 @@ struct Cli {
     /// Random seed for game simulation
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Let the human player (requires "h" in --players) choose which card to draw for their
+    /// opening hand and each turn's draw, instead of drawing automatically.
+    #[arg(long)]
+    override_draws: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -59,7 +64,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // create app and run it
-    let app = App::new(&cli.deck_a, &cli.deck_b, player_codes, cli.seed)?;
+    let app = App::new(
+        &cli.deck_a,
+        &cli.deck_b,
+        player_codes,
+        cli.seed,
+        cli.override_draws,
+    )?;
     let res = run_app(&mut terminal, app);
 
     // restore terminal
@@ -109,6 +120,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                         KeyCode::Char('c') => app.toggle_lock_actions_center(),
                         KeyCode::Char('A') => app.scroll_opponent_hand_left(),
                         KeyCode::Char('D') => app.scroll_opponent_hand_right(),
+                        // Undo the last applied action (interactive mode only)
+                        KeyCode::Char('u') | KeyCode::Backspace => app.undo(),
+                        // Page through action/draw-choice lists longer than 9 items
+                        KeyCode::PageDown => app.next_action_page(),
+                        KeyCode::PageUp => app.prev_action_page(),
                         _ => {}
                     }
                 }
@@ -142,6 +158,7 @@ mod tests {
             "example_decks/weezing-arbok.txt",
             vec![PlayerCode::R, PlayerCode::R],
             None,
+            false,
         )
         .expect("Failed to create app");
 
@@ -151,5 +168,95 @@ mod tests {
 
         // This should not panic
         terminal.draw(|f| ui(f, &app)).expect("Failed to render UI");
+    }
+
+    /// Regression test for a real bug: when the human plays seat 0 (`--players h,r`), their
+    /// own hand used to render as hidden "?" cards (hardcoded to always treat seat 0's hand as
+    /// "the opponent's") while the bot's hand was fully revealed. Render to a `TestBackend` and
+    /// scan the actual text buffer to confirm the human's real card names appear on screen and
+    /// the bot's don't.
+    #[test]
+    fn test_seat_0_human_sees_own_hand_not_opponents() {
+        let mut app = App::new(
+            "example_decks/venusaur-exeggutor.txt",
+            "example_decks/weezing-arbok.txt",
+            vec![PlayerCode::H, PlayerCode::R],
+            Some(7),
+            false,
+        )
+        .expect("Failed to create app");
+
+        // Drive forward until both actives are placed (turn >= 1), auto-picking the first
+        // option for every real human decision along the way.
+        for _ in 0..500 {
+            if app.get_state().turn_count >= 1 {
+                break;
+            }
+            let possible_actions = app.get_possible_actions();
+            if app.is_current_actor_human() && possible_actions.len() > 1 {
+                app.handle_action_selection(0);
+            }
+            app.tick_game();
+        }
+        assert_eq!(
+            app.bottom_seat(),
+            0,
+            "seat 0 should render at the bottom when it's the only human seat"
+        );
+
+        let backend = TestBackend::new(140, 50);
+        let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
+        terminal.draw(|f| ui(f, &app)).expect("Failed to render UI");
+
+        let mut screen = String::new();
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+
+        let human_hand = &app.get_state().hands[0];
+        assert!(
+            !human_hand.is_empty(),
+            "test setup: the human seat should have drawn its opening hand by turn 1"
+        );
+        for card in human_hand {
+            assert!(
+                screen.contains(&card.get_name()),
+                "human's own card {} should be visible on screen",
+                card.get_name()
+            );
+        }
+
+        // Card names already placed on the bot's board (active/bench) legitimately appear on
+        // screen regardless of hand concealment — only check hand cards that aren't also an
+        // in-play Pokemon name, to avoid a false positive from e.g. a second copy of a
+        // basic that's already active.
+        let bot_state = app.get_state();
+        let bot_board_names: Vec<String> = bot_state.in_play_pokemon[1]
+            .iter()
+            .flatten()
+            .map(|p| p.card.get_name())
+            .collect();
+        let bot_hand = &bot_state.hands[1];
+        assert!(
+            !bot_hand.is_empty(),
+            "test setup: the bot seat should have drawn its opening hand by turn 1"
+        );
+        for card in bot_hand
+            .iter()
+            .filter(|c| !bot_board_names.contains(&c.get_name()))
+        {
+            assert!(
+                !screen.contains(&card.get_name()),
+                "bot's concealed card {} should not be visible on screen",
+                card.get_name()
+            );
+        }
+
+        assert!(screen.contains("P1 Active"));
+        assert!(screen.contains("P2 Active"));
     }
 }

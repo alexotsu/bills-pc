@@ -1,5 +1,5 @@
 use deckgym::{
-    actions::{Action, SimpleAction},
+    actions::{Action, DrawSource, SimpleAction},
     card_ids::CardId,
     database::get_card_by_enum,
     models::{Card, EnergyType},
@@ -105,7 +105,10 @@ fn test_draw_action() {
     let deck_size = state.decks[state.current_player].cards.len();
     let action = Action {
         actor: state.current_player,
-        action: SimpleAction::DrawCard { amount: 1 },
+        action: SimpleAction::DrawCard {
+            amount: 1,
+            source: DrawSource::TurnStart,
+        },
         is_stack: false,
     };
     game.apply_action(&action);
