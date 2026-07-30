@@ -747,7 +747,7 @@ impl From<PendingDecision> for PyPendingDecision {
                 draw_source: Some(format!("{source:?}")),
                 outcome: None,
             },
-            PendingDecision::GameOver(outcome) => PyPendingDecision {
+            PendingDecision::GameOver { outcome } => PyPendingDecision {
                 kind: "game_over".to_string(),
                 actor: None,
                 actions: None,
@@ -843,8 +843,13 @@ impl PyGame {
     /// is true, the seat's TurnStart/InitialHand draws also pause for submit_draw().
     fn set_interactive(&mut self, seat: usize, override_draws: bool) -> PyResult<()> {
         check_seat(seat)?;
-        self.game
-            .set_interactive(seat, InteractiveConfig { override_draws });
+        self.game.set_interactive(
+            seat,
+            InteractiveConfig {
+                override_draws,
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 

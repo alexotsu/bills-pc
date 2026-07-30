@@ -138,7 +138,7 @@ fn drive_seat_zero_to_completion(game: &mut Game) -> Option<GameOutcome> {
             PendingDecision::AwaitingDraw { .. } => {
                 game.submit_draw(None).expect("submit_draw should succeed")
             }
-            PendingDecision::GameOver(outcome) => return outcome,
+            PendingDecision::GameOver { outcome } => return outcome,
         };
     }
     panic!("game did not terminate within the ply budget");
@@ -166,6 +166,7 @@ fn test_turn_start_draw_override_picks_non_top_of_deck_card() {
         0,
         InteractiveConfig {
             override_draws: true,
+            ..Default::default()
         },
     );
 
@@ -190,7 +191,9 @@ fn test_turn_start_draw_override_picks_non_top_of_deck_card() {
                     .submit_action(action)
                     .expect("submit_action should succeed");
             }
-            PendingDecision::GameOver(_) => panic!("game ended before player 0's TurnStart draw"),
+            PendingDecision::GameOver { .. } => {
+                panic!("game ended before player 0's TurnStart draw")
+            }
         }
         iterations += 1;
         assert!(
@@ -228,6 +231,7 @@ fn test_initial_hand_draw_override_produces_exact_chosen_hand() {
         0,
         InteractiveConfig {
             override_draws: true,
+            ..Default::default()
         },
     );
 
@@ -266,7 +270,7 @@ fn test_initial_hand_draw_override_produces_exact_chosen_hand() {
                     .submit_action(action)
                     .expect("submit_action should succeed");
             }
-            PendingDecision::GameOver(_) => panic!("game ended before opening hand was drawn"),
+            PendingDecision::GameOver { .. } => panic!("game ended before opening hand was drawn"),
         }
     }
 
@@ -397,7 +401,7 @@ fn test_export_parity_for_interactive_game_matches_bulk_play() {
                 PendingDecision::AwaitingDraw { .. } => {
                     game.submit_draw(None).expect("submit_draw should succeed")
                 }
-                PendingDecision::GameOver(_) => break,
+                PendingDecision::GameOver { .. } => break,
             };
         }
     }
@@ -424,6 +428,7 @@ fn test_submit_draw_errors_when_card_not_in_deck() {
         0,
         InteractiveConfig {
             override_draws: true,
+            ..Default::default()
         },
     );
 
@@ -441,7 +446,7 @@ fn test_submit_draw_errors_when_card_not_in_deck() {
                     .submit_action(action)
                     .expect("submit_action should succeed");
             }
-            PendingDecision::GameOver(_) => panic!("game ended before player 0's first draw"),
+            PendingDecision::GameOver { .. } => panic!("game ended before player 0's first draw"),
         }
     }
 
@@ -477,7 +482,7 @@ fn test_submit_action_rejects_illegal_action() {
             PendingDecision::AwaitingDraw { .. } => {
                 pending = game.submit_draw(None).expect("submit_draw should succeed");
             }
-            PendingDecision::GameOver(_) => panic!("game ended before any AwaitingAction"),
+            PendingDecision::GameOver { .. } => panic!("game ended before any AwaitingAction"),
         }
     }
 
@@ -494,5 +499,172 @@ fn test_submit_action_rejects_illegal_action() {
         game.get_state_clone(),
         state_before,
         "state must be unchanged after a failed submit_action"
+    );
+}
+
+/// With a single Basic in hand, placing it as Active is the only legal action — with
+/// `auto_advance_forced_actions: false`, that must still pause for confirmation rather than
+/// being silently auto-applied (e.g. so the web frontend can let a player see their opening
+/// hand before it gets played).
+#[test]
+fn test_auto_advance_forced_actions_false_pauses_before_forced_single_action() {
+    let (deck_a, deck_b) = load_test_decks();
+    let player_a: Box<dyn Player> = Box::new(InteractivePlayer { deck: deck_a });
+    let player_b: Box<dyn Player> = Box::new(RandomPlayer { deck: deck_b });
+    let mut game = Game::new(vec![player_a, player_b], 7);
+    game.set_interactive(
+        0,
+        InteractiveConfig {
+            auto_advance_forced_actions: false,
+            ..Default::default()
+        },
+    );
+
+    let mut state = game.get_state_clone();
+    state.move_generation_stack.clear();
+    state.current_player = 0;
+    state.hands[0].clear();
+    state.hands[0].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    // Player 1 also needs a placeable hand — clearing move_generation_stack above wipes both
+    // players' queued opening-hand draws, so without this RandomPlayer would hit its own setup
+    // turn with an empty hand and no legal actions at all.
+    state.hands[1].clear();
+    state.hands[1].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    game.set_state(state);
+
+    match game.step() {
+        PendingDecision::AwaitingAction { actor, actions } => {
+            assert_eq!(actor, 0);
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(actions[0].action, SimpleAction::Place(_, 0)));
+        }
+        other => panic!("expected a paused AwaitingAction for the forced Place, got {other:?}"),
+    }
+    assert!(
+        game.get_state_clone().in_play_pokemon[0][0].is_none(),
+        "the forced Place must not have been applied yet — it's still pending confirmation"
+    );
+}
+
+/// Same setup, but with the default config (`auto_advance_forced_actions: true`) — the
+/// placement should resolve straight through with no pause, matching behavior from before this
+/// field existed.
+#[test]
+fn test_auto_advance_forced_actions_true_applies_forced_single_action_silently() {
+    let (deck_a, deck_b) = load_test_decks();
+    let player_a: Box<dyn Player> = Box::new(InteractivePlayer { deck: deck_a });
+    let player_b: Box<dyn Player> = Box::new(RandomPlayer { deck: deck_b });
+    let mut game = Game::new(vec![player_a, player_b], 7);
+    game.set_interactive(0, InteractiveConfig::default());
+
+    let mut state = game.get_state_clone();
+    state.move_generation_stack.clear();
+    state.current_player = 0;
+    state.hands[0].clear();
+    state.hands[0].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    // Player 1 also needs a placeable hand — clearing move_generation_stack above wipes both
+    // players' queued opening-hand draws, so without this RandomPlayer would hit its own setup
+    // turn with an empty hand and no legal actions at all.
+    state.hands[1].clear();
+    state.hands[1].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    game.set_state(state);
+
+    game.step();
+    assert!(
+        game.get_state_clone().in_play_pokemon[0][0].is_some(),
+        "Bulbasaur should have been placed automatically, with no pause"
+    );
+}
+
+/// Attacking already ends your turn by the game's own rules — the EndTurn that follows must
+/// auto-advance even with `auto_advance_forced_actions: false`, since re-confirming it would be
+/// redundant (the player already made the turn-ending call when they chose to attack).
+#[test]
+fn test_end_turn_after_attacking_does_not_pause_for_confirmation() {
+    let (deck_a, deck_b) = load_test_decks();
+    let player_a: Box<dyn Player> = Box::new(InteractivePlayer { deck: deck_a });
+    let player_b: Box<dyn Player> = Box::new(RandomPlayer { deck: deck_b });
+    let mut game = Game::new(vec![player_a, player_b], 7);
+    game.set_interactive(
+        0,
+        InteractiveConfig {
+            auto_advance_forced_actions: false,
+            ..Default::default()
+        },
+    );
+
+    // Drive through real setup-phase placement for *both* players (not just player 0) — an
+    // attack needs a real opposing active to hit, and forcing turn_count/current_player
+    // directly without one leads to an inconsistent state the engine was never meant to see.
+    let mut state = game.get_state_clone();
+    state.move_generation_stack.clear();
+    state.current_player = 0;
+    state.hands[0].clear();
+    state.hands[0].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    state.hands[1].clear();
+    state.hands[1].push(get_card_by_enum(CardId::A1001Bulbasaur));
+    game.set_state(state);
+
+    // Setup phase needs an explicit EndTurn from each player after their Place, to signal
+    // "done with my setup" — that's what actually advances to the other player (or, once both
+    // are done, into turn 1) via forecast_end_turn, not the Place itself.
+    let place0 = find_action(&game, |a| matches!(a.action, SimpleAction::Place(_, 0)));
+    game.apply_action(&place0);
+    let end0 = find_action(&game, |a| matches!(a.action, SimpleAction::EndTurn));
+    game.apply_action(&end0);
+    let place1 = find_action(&game, |a| matches!(a.action, SimpleAction::Place(_, 0)));
+    game.apply_action(&place1);
+    let end1 = find_action(&game, |a| matches!(a.action, SimpleAction::EndTurn));
+    game.apply_action(&end1);
+    // Both actives are now placed, which transitions turn_count 0 -> 1 and current_player to
+    // whoever goes first (player 0, per forecast_end_turn's next_player calculation).
+    assert_eq!(game.get_state_clone().turn_count, 1);
+    assert_eq!(game.get_state_clone().current_player, 0);
+
+    // Resolve the mandatory TurnStart draw so play_tick's move_generation_stack is clear and
+    // Attack becomes available (it's queued ahead of everything else at the start of a turn).
+    game.play_tick();
+
+    // Attach plenty of energy directly (a public field) rather than resolving several real
+    // turns' worth of energy-zone attachments — this test only cares about what happens once an
+    // Attack has been made, not how the energy got there. Also clear the hand so nothing else
+    // is legal after attacking.
+    //
+    // move_generation_stack must be cleared too: generate_possible_actions short-circuits to
+    // its cached top frame when non-empty (see move_generation/mod.rs), which by this point
+    // already holds the main-turn action list computed *before* these mutations (pushed when
+    // play_tick resolved the draw above) — without clearing it, every subsequent
+    // generate_possible_actions call keeps returning that stale, pre-mutation list no matter
+    // what the state actually says.
+    let mut state = game.get_state_clone();
+    state.move_generation_stack.clear();
+    state.in_play_pokemon[0][0]
+        .as_mut()
+        .unwrap()
+        .attached_energy = vec![EnergyType::Grass; 4];
+    state.hands[0].clear();
+    game.set_state(state);
+
+    let attack = find_action(&game, |a| matches!(a.action, SimpleAction::Attack(_)));
+    game.apply_action(&attack);
+
+    // Confirm we've actually reached the scenario the fix targets: EndTurn is now the sole
+    // legal action for player 0, as a direct consequence of having just attacked.
+    let (post_attack_actor, post_attack_actions) =
+        game.get_state_clone().generate_possible_actions();
+    assert_eq!(post_attack_actor, 0);
+    assert_eq!(post_attack_actions.len(), 1);
+    assert_eq!(post_attack_actions[0].action, SimpleAction::EndTurn);
+
+    // `game.step()` resolves everything up to the *next* real pause — which, once the
+    // post-attack EndTurn auto-advances as intended, is however far into player 1's
+    // (non-interactive) turn or beyond that naturally reaches next. So rather than assert on
+    // whatever that far-future decision happens to be, just confirm turn_count actually moved
+    // past 1: that can only happen if the post-attack EndTurn was applied rather than sitting
+    // paused waiting on a confirmation nobody sent.
+    game.step();
+    assert!(
+        game.get_state_clone().turn_count > 1,
+        "the post-attack EndTurn should have auto-applied, advancing past turn 1"
     );
 }

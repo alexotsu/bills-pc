@@ -12,13 +12,38 @@ use super::Game;
 /// Per-seat opt-in configuration for the interactive control plane. Attached to a `Game`
 /// post-construction via `Game::set_interactive` — `Game::new`'s signature is untouched, so
 /// every existing caller keeps today's fully-scripted behavior by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct InteractiveConfig {
     /// If true, this seat's `TurnStart`/`InitialHand` draws pause for an explicit
     /// `Game::submit_draw` call instead of silently resolving top-of-deck. If false, this
     /// seat still pauses with `PendingDecision::AwaitingAction` for every real (len > 1)
     /// decision, but its draws resolve normally.
     pub override_draws: bool,
+    /// If false, a decision point with exactly one legal *non-draw* action (e.g. "EndTurn" is
+    /// the only thing left to do, or only one Basic in hand so it's the only legal Place) still
+    /// pauses with `PendingDecision::AwaitingAction` for this seat instead of applying it
+    /// silently — otherwise a human player can be surprised by their turn ending, or their
+    /// opening hand being played, with no visible confirmation. If true, these resolve
+    /// automatically exactly like a non-interactive seat would.
+    ///
+    /// One exception regardless of this setting: an EndTurn that's the sole legal action
+    /// *because the player just attacked* always auto-advances — attacking already is the
+    /// player's decision to end their turn, by the game's own rules, so re-confirming it would
+    /// be redundant (see `resolve_until_decision`).
+    pub auto_advance_forced_actions: bool,
+}
+
+impl Default for InteractiveConfig {
+    fn default() -> Self {
+        // `auto_advance_forced_actions: true` (not derived-Default's `false`) so every existing
+        // caller of `InteractiveConfig::default()` keeps behaving exactly as it did before this
+        // field existed — only callers that explicitly opt out (the web frontend's own toggle)
+        // get the new pause-and-confirm behavior.
+        Self {
+            override_draws: false,
+            auto_advance_forced_actions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +70,12 @@ pub enum PendingDecision {
         source: DrawSource,
         amount: u8,
     },
-    /// The game has ended; mirrors `State::winner`.
-    GameOver(Option<GameOutcome>),
+    /// The game has ended; mirrors `State::winner`. A struct variant (not a newtype/tuple
+    /// variant) specifically because `#[serde(tag = "kind")]` (internal tagging) can't
+    /// serialize a newtype variant whose payload isn't itself a JSON object — `Option<T>`
+    /// isn't, so `GameOver(Option<GameOutcome>)` would fail to serialize at all the moment a
+    /// game actually ended. A named field sidesteps that entirely.
+    GameOver { outcome: Option<GameOutcome> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -158,7 +187,9 @@ impl<'a> Game<'a> {
     fn resolve_until_decision(&mut self) -> PendingDecision {
         loop {
             if self.state.is_game_over() {
-                return PendingDecision::GameOver(self.state.winner);
+                return PendingDecision::GameOver {
+                    outcome: self.state.winner,
+                };
             }
             let (actor, actions) = self.state.generate_possible_actions();
 
@@ -171,6 +202,17 @@ impl<'a> Game<'a> {
                             amount,
                         };
                     }
+                } else if actions[0].action == SimpleAction::EndTurn
+                    && self.state.attack_name_used_this_turn[actor].is_some()
+                {
+                    // Attacking ends your turn by the game's own rules — the player already
+                    // made that call when they chose to attack, so pausing again just to
+                    // confirm the EndTurn that inevitably follows would be redundant, not
+                    // informative. This is the one case that auto-advances regardless of
+                    // `auto_advance_forced_actions`; every *other* forced single action still
+                    // honors it.
+                } else if self.wants_forced_action_confirmation(actor) {
+                    return PendingDecision::AwaitingAction { actor, actions };
                 }
             } else if self.is_interactive(actor) {
                 return PendingDecision::AwaitingAction { actor, actions };
@@ -199,5 +241,12 @@ impl<'a> Game<'a> {
                 self.interactive_seats[actor],
                 SeatMode::Interactive(cfg) if cfg.override_draws
             )
+    }
+
+    fn wants_forced_action_confirmation(&self, actor: usize) -> bool {
+        matches!(
+            self.interactive_seats[actor],
+            SeatMode::Interactive(cfg) if !cfg.auto_advance_forced_actions
+        )
     }
 }

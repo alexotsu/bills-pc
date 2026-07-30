@@ -127,6 +127,20 @@ fi
 
 # --- 7. API server + frontend, both foregrounded so Ctrl+C stops everything ------------------
 
+port_in_use() {
+  lsof -iTCP:"$1" -sTCP:LISTEN -n -P >/dev/null 2>&1
+}
+
+if port_in_use 8080 || port_in_use 3000; then
+  echo "Port 8080 or 3000 is already in use — probably a leftover process from a" >&2
+  echo "previous ./dev.sh run that didn't get cleaned up. Find and stop it with:" >&2
+  echo "  lsof -iTCP:8080 -sTCP:LISTEN -n -P" >&2
+  echo "  lsof -iTCP:3000 -sTCP:LISTEN -n -P" >&2
+  echo "  kill -9 <pid>" >&2
+  echo "then re-run this script." >&2
+  exit 1
+fi
+
 cleaned_up=false
 cleanup() {
   [ "$cleaned_up" = true ] && return
@@ -136,6 +150,14 @@ cleanup() {
   # reach cargo's/npm's actual child process (see the `set -m` comment above).
   for pid in "${api_pid:-}" "${frontend_pid:-}"; do
     [ -n "$pid" ] && kill -TERM -- "-$pid" 2>/dev/null || true
+  done
+  # Next.js's dev server has been observed to leave its "next-server" worker process ignoring
+  # SIGTERM outright, silently surviving as a stale process holding :3000 across supposedly-
+  # stopped sessions (that's what the port_in_use preflight check above is guarding against) —
+  # escalate to SIGKILL for anything still alive after a short grace period.
+  sleep 1
+  for pid in "${api_pid:-}" "${frontend_pid:-}"; do
+    [ -n "$pid" ] && kill -KILL -- "-$pid" 2>/dev/null || true
   done
 }
 trap cleanup EXIT INT TERM
