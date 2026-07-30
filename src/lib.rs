@@ -13,8 +13,10 @@ pub mod gameplay_stats_collector;
 mod hooks;
 pub mod models;
 pub mod move_generation;
+#[cfg(feature = "parallel")]
 pub mod optimize;
 pub mod players;
+#[cfg(feature = "parallel")]
 pub mod simulate;
 pub mod simulation_event_handler;
 pub mod stadiums;
@@ -28,10 +30,12 @@ pub use deck::Deck;
 pub use game::Game;
 pub use hooks::to_playable_card;
 pub use move_generation::generate_possible_trainer_actions;
+#[cfg(feature = "parallel")]
 pub use optimize::{
     cli_optimize, optimize, optimize_with_configs, EnemyDeckConfig, OptimizationConfig,
     ParallelConfig, SimulationConfig,
 };
+#[cfg(feature = "parallel")]
 pub use simulate::{simulate, Simulation, SimulationCallbacks};
 pub use simulation_event_handler::ComputedStats;
 pub use state::State;

@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::{
     actions::{apply_action, Action, DrawSource, SimpleAction},
     models::Card,
@@ -10,7 +12,7 @@ use super::Game;
 /// Per-seat opt-in configuration for the interactive control plane. Attached to a `Game`
 /// post-construction via `Game::set_interactive` — `Game::new`'s signature is untouched, so
 /// every existing caller keeps today's fully-scripted behavior by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct InteractiveConfig {
     /// If true, this seat's `TurnStart`/`InitialHand` draws pause for an explicit
     /// `Game::submit_draw` call instead of silently resolving top-of-deck. If false, this
@@ -30,7 +32,8 @@ pub(crate) enum SeatMode {
 
 /// The next point in the game requiring external input, returned by `Game::step` and every
 /// `submit_*` call.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PendingDecision {
     /// `actor` must choose one of `actions` (len >= 2). Resolve with `Game::submit_action`.
     AwaitingAction { actor: usize, actions: Vec<Action> },
@@ -46,7 +49,8 @@ pub enum PendingDecision {
     GameOver(Option<GameOutcome>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SubmitError {
     GameOver,
     /// The submitted action isn't a member of the current legal action set. State is left
