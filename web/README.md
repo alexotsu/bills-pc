@@ -3,8 +3,9 @@
 Scaffolding for the web interface described in [`SPEC.md`](./SPEC.md): Rust (Axum) backend,
 Next.js frontend, deckgym-core compiled to WASM and run client-side for zero-latency gameplay.
 
-**This is not a finished app yet.** Real authentication, deck CRUD, and the hotseat game board
-are implemented; battle-history persistence is not — see "What's here" below.
+**This is not a finished app yet.** Real authentication, deck CRUD, the hotseat game board, and
+battle-history persistence are all implemented — see "What's here" below for the remaining rough
+edges.
 
 ## Layout
 
@@ -76,8 +77,10 @@ below). Once logged in, `http://localhost:3000/decks` lists your decks and any r
 (viewable without logging in too), with a card-picker builder at `/decks/new` and
 `/decks/:id/edit`. Once you have at least 2 decks, `http://localhost:3000/play` starts a real
 hotseat game — pick two decks and play a full match, entirely client-side, through the wasm
-engine. `http://localhost:3000/scaffold-check` still exists too — it constructs a `WasmGame`
-directly and fetches the API's `/health` endpoint; not the real game UI.
+engine; every ply syncs to the API as you play, and `http://localhost:3000/games` lists finished
+and in-progress games with a filterable history and a per-game replay view.
+`http://localhost:3000/scaffold-check` still exists too — it constructs a `WasmGame` directly and
+fetches the API's `/health` endpoint; not the real game UI.
 
 ### Google/Facebook OAuth setup
 
@@ -105,19 +108,23 @@ crate, PKCE + CSRF), DB-backed session cookies, and GDPR-compliant account delet
 engine's full card catalog with implementation status, via `deckgym` as a path dependency),
 `GET`/`POST /api/decks`, `GET`/`PUT`/`DELETE /api/decks/:id`, validated server-side with the
 engine's own `Deck::from_string`/`is_valid()` and `card_validation::get_implementation_status`,
-with a 409 if you try to edit or delete a deck that's already been used in a game; and a real
+with a 409 if you try to edit or delete a deck that's already been used in a game; a real
 hotseat game board (`/play`) — `WasmGame` (`web/engine-wasm`) wraps the engine's interactive
 control plane (`step`/`submit_action`/`submit_draw`, plus `undo`/`can_undo`, mirroring the
 TUI's `state_history` pattern) and runs entirely client-side, with a board matching the real
-game's layout (active + 3 bench slots, energy zone, discard, stadium, hand), a paginated action
-list, and a "pass the device" handoff gate so switching whose turn it is doesn't flash the
-incoming player's hand before they've actually taken the device.
+game's layout (active + 3 bench slots, energy zone, discard, stadium, hand) and a paginated
+action list; and battle-history persistence — `POST /api/games` creates a row before the first
+ply so even an abandoned game is saved, plies sync to `POST /api/games/:id/plies` as they're
+played (bulk-upserted, deduplicated by `(game_id, ply)`), the outcome is `PATCH`ed the moment a
+game ends (naturally or via the board's "Declare Winner" button), and undo deletes any
+now-invalid trailing plies (`DELETE /api/games/:id/plies?from=N`) so a corrected decision doesn't
+linger in the saved record. `GET /api/games` lists a user's own games, filterable by outcome
+(including "incomplete", i.e. `outcome is null`) and by deck; `GET /api/games/:id` returns the
+full ply list for the `/games/:id` replay view.
 
 Frontend pages: `/register`, `/login`, `/complete-signup` (the opt-in-confirmation step for
-first-time OAuth signups), `/account`, `/decks`, `/decks/new`, `/decks/:id/edit`, `/play`.
-
-**Not here yet** (separate follow-up work): battle-history persistence. The `/api/games` stub
-route still returns placeholder data — games played at `/play` aren't saved anywhere yet.
+first-time OAuth signups), `/account`, `/decks`, `/decks/new`, `/decks/:id/edit`, `/play`,
+`/games`, `/games/:id`.
 
 ## Known rough edges
 

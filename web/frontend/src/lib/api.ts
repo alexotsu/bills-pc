@@ -35,6 +35,46 @@ export type CardCatalogEntry = {
   image_url: string | null;
 };
 
+export type GameOutcomeLabel = "win" | "loss" | "tie";
+
+export type GameListItem = {
+  id: string;
+  deck_a_id: string;
+  deck_a_name: string;
+  deck_b_id: string;
+  deck_b_name: string;
+  mode: string;
+  outcome: GameOutcomeLabel | null;
+  seed: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Game = {
+  id: string;
+  user_id: string | null;
+  deck_a_id: string;
+  deck_b_id: string;
+  mode: string;
+  outcome: GameOutcomeLabel | null;
+  seed: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** A single saved ply, mirroring the engine's `ExportedDataPoint` (`src/data_exporter.rs`).
+ * `state`/`playable_actions`/`chosen_action` are stored (and returned) as opaque JSON — see the
+ * comment on `GameDetail` in `web/api/src/games.rs` for why they're untyped here too. */
+export type GamePly = {
+  ply: number;
+  actor: number;
+  state: unknown;
+  playable_actions: unknown;
+  chosen_action: unknown;
+};
+
+export type GameDetail = Game & { plies: GamePly[] };
+
 export class ApiRequestError extends Error {
   constructor(
     public status: number,
@@ -147,4 +187,65 @@ export function updateDeck(
 
 export function deleteDeck(id: string): Promise<void> {
   return request<void>(`/api/decks/${id}`, { method: "DELETE" });
+}
+
+export function createGame(params: {
+  deck_a_id: string;
+  deck_b_id: string;
+  mode: "hotseat" | "ai";
+  /** A stringified bigint — see the comment on `CreateGameRequest::seed` in
+   * web/api/src/games.rs for why: JSON.stringify throws on a raw bigint. */
+  seed: string;
+}): Promise<Game> {
+  return request<Game>("/api/games", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}
+
+export function submitPlies(
+  gameId: string,
+  plies: {
+    ply: number;
+    actor: number;
+    state: unknown;
+    playable_actions: unknown;
+    chosen_action: unknown;
+  }[],
+): Promise<void> {
+  return request<void>(`/api/games/${gameId}/plies`, {
+    method: "POST",
+    body: JSON.stringify({ plies }),
+  });
+}
+
+/** Removes every persisted ply at or after `from` — used when Undo reverts one or more actions,
+ * so a decision the player corrected doesn't linger in the saved record. */
+export function deletePliesFrom(gameId: string, from: number): Promise<void> {
+  return request<void>(`/api/games/${gameId}/plies?from=${from}`, { method: "DELETE" });
+}
+
+export function updateGameOutcome(
+  gameId: string,
+  outcome: GameOutcomeLabel,
+): Promise<Game> {
+  return request<Game>(`/api/games/${gameId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ outcome }),
+  });
+}
+
+export function fetchGames(filters?: {
+  outcome?: GameOutcomeLabel | "incomplete";
+  deckId?: string;
+}): Promise<GameListItem[]> {
+  const params = new URLSearchParams();
+  if (filters?.outcome) params.set("outcome", filters.outcome);
+  if (filters?.deckId) params.set("deck_id", filters.deckId);
+  const query = params.toString();
+  return request<GameListItem[]>(`/api/games${query ? `?${query}` : ""}`);
+}
+
+export function fetchGame(id: string): Promise<GameDetail> {
+  return request<GameDetail>(`/api/games/${id}`);
 }
