@@ -220,13 +220,17 @@ function CardRow({
 
   return (
     <li className="flex items-center justify-between gap-2 rounded border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-800">
-      <span className="flex items-center gap-2">
+      <span className="flex min-w-0 items-center gap-2">
         <CardThumbnail card={card} />
-        <span className="flex flex-col">
-          <span>
+        {/* Fixed width, regardless of content: without it, the "x/2 across printings" badge
+            appearing only once nameTotal > 0 widens this block and shoves the +/- buttons over
+            via justify-between — meaning the "+" button physically moves between your first and
+            second click when going from 0 to 2 copies of a card. */}
+        <span className="flex w-40 min-w-0 flex-col">
+          <span className="truncate">
             {card.name} {card.is_basic && <span className="text-xs text-zinc-500">(Basic)</span>}
           </span>
-          <span className="text-xs text-zinc-500">
+          <span className="truncate text-xs text-zinc-500">
             {card.id}
             {nameTotal > 0 && ` · ${nameTotal}/2 across printings`}
           </span>
