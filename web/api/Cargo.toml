@@ -5,6 +5,8 @@ edition = "2021"
 description = "Axum backend for the deckgym web app: accounts, decks, battle history"
 
 [dependencies]
+deckgym = { path = "../..", default-features = false }
+strum = "0.27"
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.8", features = [

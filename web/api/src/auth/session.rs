@@ -94,3 +94,23 @@ impl FromRequestParts<AppState> for CurrentUser {
         Ok(CurrentUser(user))
     }
 }
+
+/// Like `CurrentUser`, but for routes usable by both logged-in and anonymous callers (e.g.
+/// listing decks, which mixes a user's own decks with public reference decks) — `None` instead
+/// of a 401 when there's no valid session, and never fails to extract.
+pub struct OptionalCurrentUser(pub Option<User>);
+
+#[axum::async_trait]
+impl FromRequestParts<AppState> for OptionalCurrentUser {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match CurrentUser::from_request_parts(parts, state).await {
+            Ok(CurrentUser(user)) => Ok(Self(Some(user))),
+            Err(_) => Ok(Self(None)),
+        }
+    }
+}

@@ -8,6 +8,33 @@ export type User = {
   created_at: string;
 };
 
+export type Deck = {
+  id: string;
+  user_id: string | null;
+  name: string;
+  deck_text: string;
+  is_reference: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ImplementationStatus =
+  | "Complete"
+  | "CardNotFound"
+  | "MissingAttack"
+  | "MissingAbility"
+  | "MissingTrainer"
+  | "MissingTool";
+
+export type CardCatalogEntry = {
+  id: string;
+  name: string;
+  card_type: "pokemon" | "trainer";
+  is_basic: boolean;
+  status: ImplementationStatus;
+  image_url: string | null;
+};
+
 export class ApiRequestError extends Error {
   constructor(
     public status: number,
@@ -87,4 +114,37 @@ export function completeOAuthSignup(trainingDataOptIn: boolean): Promise<User> {
 
 export function oauthStartUrl(provider: "google" | "facebook"): string {
   return `${API_URL}/api/auth/oauth/${provider}/start`;
+}
+
+export function fetchCards(): Promise<CardCatalogEntry[]> {
+  return request<CardCatalogEntry[]>("/api/cards");
+}
+
+export function fetchDecks(): Promise<Deck[]> {
+  return request<Deck[]>("/api/decks");
+}
+
+export function fetchDeck(id: string): Promise<Deck> {
+  return request<Deck>(`/api/decks/${id}`);
+}
+
+export function createDeck(params: { name: string; deck_text: string }): Promise<Deck> {
+  return request<Deck>("/api/decks", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}
+
+export function updateDeck(
+  id: string,
+  params: { name: string; deck_text: string },
+): Promise<Deck> {
+  return request<Deck>(`/api/decks/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(params),
+  });
+}
+
+export function deleteDeck(id: string): Promise<void> {
+  return request<void>(`/api/decks/${id}`, { method: "DELETE" });
 }
