@@ -33,7 +33,25 @@ export type UseWasmGameResult = {
   /** Set once the game row has been created server-side; null until then (or forever, if
    * persistence failed — gameplay itself never blocks on this). */
   gameId: string | null;
-  submitAction: (action: Action) => void;
+  /** Returns the resulting `PendingDecision` — `undefined` if the submission was a no-op
+   * (stale/wrong-kind pending, or no game yet). Note: calling this twice synchronously in the
+   * same tick to chain two actions is unsafe (the second call would see the *first* call's
+   * now-stale `pending`/`state` closure, corrupting its ply-history record) — use
+   * `submitActionThenChoose` for that instead. */
+  submitAction: (action: Action) => PendingDecision | undefined;
+  /** Submits `first`, then — if the resulting decision is `awaiting_action` and `chooseNext`
+   * picks a legal action from it — submits that too, as a single logical unit with only one
+   * final state refresh. For engine-level action pairs the player experiences as one gesture
+   * but that are actually two separate submissions (e.g. the mobile board's "drag a Tool card
+   * onto a Pokémon": the engine models this as `Play` followed by a separate `AttachTool`
+   * choice, since Pokémon Tools are played via the same `Play` action as every other trainer
+   * card and only reveal which Pokémon can receive them *after* that submission). Both steps'
+   * plies are captured against their own correct pre-action state, unlike two chained
+   * `submitAction` calls would manage. Returns the final decision. */
+  submitActionThenChoose: (
+    first: Action,
+    chooseNext: (decision: PendingDecision) => Action | null,
+  ) => PendingDecision | undefined;
   submitDraw: (card: Card | null) => void;
   undo: () => void;
   declareWinner: (outcome: GameOutcome) => void;
@@ -207,15 +225,48 @@ export function useWasmGame(
     void syncPlies();
   }
 
-  function submitAction(action: Action) {
+  function submitAction(action: Action): PendingDecision | undefined {
     const game = gameRef.current;
-    if (!game || !pending || pending.kind !== "awaiting_action" || !state) return;
+    if (!game || !pending || pending.kind !== "awaiting_action" || !state) return undefined;
     try {
       const decision = game.submit_action(action);
       capturePly(pending.actor, state, pending.actions, action);
       refreshFrom(decision);
+      return decision;
     } catch (err) {
       setError(String(err));
+      return undefined;
+    }
+  }
+
+  function submitActionThenChoose(
+    first: Action,
+    chooseNext: (decision: PendingDecision) => Action | null,
+  ): PendingDecision | undefined {
+    const game = gameRef.current;
+    if (!game || !pending || pending.kind !== "awaiting_action" || !state) return undefined;
+    try {
+      const afterFirst = game.submit_action(first);
+      capturePly(pending.actor, state, pending.actions, first);
+
+      if (afterFirst.kind === "awaiting_action") {
+        const next = chooseNext(afterFirst);
+        if (next) {
+          // Fresh from wasm, not the React `state`/`pending` closure above (which is now stale
+          // — this is exactly the bug a second plain `submitAction` call in the same tick would
+          // have): get_state() reflects the game *after* `first` was just applied.
+          const stateBeforeSecond = game.get_state();
+          const afterSecond = game.submit_action(next);
+          capturePly(afterFirst.actor, stateBeforeSecond, afterFirst.actions, next);
+          refreshFrom(afterSecond);
+          return afterSecond;
+        }
+      }
+      refreshFrom(afterFirst);
+      return afterFirst;
+    } catch (err) {
+      setError(String(err));
+      return undefined;
     }
   }
 
@@ -291,6 +342,7 @@ export function useWasmGame(
     canUndo,
     gameId,
     submitAction,
+    submitActionThenChoose,
     submitDraw,
     undo,
     declareWinner,
