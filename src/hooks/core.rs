@@ -13,7 +13,7 @@ use crate::{
     models::{Card, EnergyType, PlayedCard, TrainerCard, TrainerType, BASIC_STAGE},
     stadiums::{
         get_arena_of_antiquity_damage_bonus, get_training_area_damage_bonus,
-        is_bounded_field_active, is_hiking_trail_active,
+        is_bounded_field_active, is_hiking_trail_active, is_soothing_shore_active,
     },
     tools::has_tool,
     State,
@@ -115,7 +115,13 @@ pub(crate) fn can_evolve_into(evolution_card: &Card, base_pokemon: &PlayedCard) 
 }
 
 /// Called when a Pokémon evolves
-pub(crate) fn on_evolve(actor: usize, state: &mut State, to_card: &Card, from_hand: bool) {
+pub(crate) fn on_evolve(
+    actor: usize,
+    state: &mut State,
+    to_card: &Card,
+    in_play_idx: usize,
+    from_hand: bool,
+) {
     if !from_hand {
         return;
     }
@@ -179,6 +185,9 @@ pub(crate) fn on_evolve(actor: usize, state: &mut State, to_card: &Card, from_ha
                 ],
             ));
         }
+        Some(AbilityMechanic::CoinFlipParalyzeOpponentActiveOnEvolve) => {
+            offer_on_evolve_ability(actor, state, in_play_idx);
+        }
         Some(AbilityMechanic::DiscardRandomEnergyFromOpponentActiveOnEvolve) => {
             let opponent = (actor + 1) % 2;
             let has_energy = state
@@ -196,6 +205,15 @@ pub(crate) fn on_evolve(actor: usize, state: &mut State, to_card: &Card, from_ha
         }
         _ => {}
     }
+}
+
+/// Offers an optional on-evolve ability as a `UseAbility` / `Noop` choice. The ability's own
+/// logic (including any coin flip) then runs through the regular `forecast_ability` pathway.
+fn offer_on_evolve_ability(actor: usize, state: &mut State, in_play_idx: usize) {
+    state.move_generation_stack.push((
+        actor,
+        vec![SimpleAction::UseAbility { in_play_idx }, SimpleAction::Noop],
+    ));
 }
 
 /// Called when a basic Pokémon is placed from hand onto the bench (index > 0).
@@ -393,7 +411,53 @@ pub(crate) fn on_end_turn(player_ending_turn: usize, state: &mut State) {
         }
     }
 
+    apply_soothing_shore_healing(player_ending_turn, state);
+
+    apply_deceptive_needle_damage(player_ending_turn, state);
+
     apply_bad_dreams_damage(state);
+}
+
+/// Deceptive Needle: At the end of your turn, if the [D] Pokémon this card is attached to is in
+/// the Active Spot, do 10 damage to your opponent's Active Pokémon.
+fn apply_deceptive_needle_damage(player_ending_turn: usize, state: &mut State) {
+    let Some(active) = state.maybe_get_active(player_ending_turn) else {
+        return;
+    };
+    if !has_tool(active, CardId::B4148DeceptiveNeedle)
+        || active.get_energy_type() != Some(EnergyType::Darkness)
+    {
+        return;
+    }
+    let opponent = (player_ending_turn + 1) % 2;
+    if state.in_play_pokemon[opponent][0].is_none() {
+        return;
+    }
+    debug!("Deceptive Needle: Doing 10 damage to opponent's Active Pokémon");
+    crate::actions::handle_damage(
+        state,
+        (player_ending_turn, 0),
+        &[(10, opponent, 0)],
+        false,
+        None,
+    );
+}
+
+/// Soothing Shore: At the end of each player's turn, that player heals 20 damage from each of
+/// their Pokémon that has any [W] Energy attached.
+fn apply_soothing_shore_healing(player_ending_turn: usize, state: &mut State) {
+    if !is_soothing_shore_active(state) {
+        return;
+    }
+    for pokemon in state.in_play_pokemon[player_ending_turn]
+        .iter_mut()
+        .flatten()
+    {
+        if pokemon.attached_energy.contains(&EnergyType::Water) {
+            debug!("Soothing Shore: Healing 20 from {}", pokemon.get_name());
+            pokemon.heal(20);
+        }
+    }
 }
 
 /// Apply Bad Dreams ability damage: for each player's Darkrai in play, if that player's
@@ -883,6 +947,22 @@ fn get_future_booster_damage_bonus(attacking_pokemon: &PlayedCard) -> u32 {
         return 20;
     }
     0
+}
+
+/// Extra times a random-spread attack (e.g. Draco Meteor) chooses a Pokémon this turn, granted
+/// by cards like Drayden.
+pub(crate) fn get_extra_random_spread_hits(state: &State, attack_name: &str) -> usize {
+    state
+        .get_current_turn_effects()
+        .iter()
+        .filter_map(|effect| match effect {
+            TurnEffect::ExtraRandomSpreadHits {
+                amount,
+                attack_name: effect_attack_name,
+            } if effect_attack_name == attack_name => Some(*amount),
+            _ => None,
+        })
+        .sum()
 }
 
 // TODO: Confirm is_from_attack and goes to enemy active

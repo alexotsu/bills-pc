@@ -20,7 +20,7 @@ use crate::{
     effects::{CardEffect, TurnEffect},
     hooks::{
         attack_effect_ignores_opponent_active_effects, can_evolve_into, contains_energy,
-        get_attack_cost, get_retreat_cost, get_stage,
+        get_attack_cost, get_extra_random_spread_hits, get_retreat_cost, get_stage,
     },
     models::{Attack, Card, EnergyType, StatusCondition, TrainerType},
     State,
@@ -222,6 +222,18 @@ fn forecast_effect_attack_by_mechanic(
             *damage_per_heads,
         ),
         Mechanic::SelfHeal { amount } => self_heal_attack(*amount, attack),
+        Mechanic::SelfHealAndCardEffect {
+            heal_amount,
+            opponent,
+            effect,
+            duration,
+        } => self_heal_and_card_effect_attack(
+            attack.fixed_damage,
+            *heal_amount,
+            *opponent,
+            effect.clone(),
+            *duration,
+        ),
         Mechanic::HealOneYourPokemon { amount } => heal_one_your_pokemon_attack(*amount),
         Mechanic::HealOneYourBenchedPokemon { amount } => {
             heal_one_your_benched_pokemon_attack(*amount)
@@ -597,7 +609,12 @@ fn forecast_effect_attack_by_mechanic(
             times,
             damage_per_hit,
             include_own_bench,
-        } => random_spread_damage(state, *times, *damage_per_hit, *include_own_bench),
+        } => random_spread_damage(
+            state,
+            *times + get_extra_random_spread_hits(state, &attack.title),
+            *damage_per_hit,
+            *include_own_bench,
+        ),
         Mechanic::ExtraDamageIfKnockedOutLastTurn { extra_damage } => {
             extra_damage_if_knocked_out_last_turn_attack(state, attack.fixed_damage, *extra_damage)
         }
@@ -2131,6 +2148,28 @@ fn self_heal_attack(heal: u32, attack: &Attack) -> AttackOutcomes {
     active_damage_effect_doutcome(attack.fixed_damage, move |_, state, action| {
         let active = state.get_active_mut(action.actor);
         active.heal(heal);
+    })
+}
+
+/// Cradily's Stick and Absorb: damage, then heal the attacker and leave a `CardEffect` on the
+/// chosen Active Pokémon (`opponent: true` → the Defending Pokémon).
+fn self_heal_and_card_effect_attack(
+    damage: u32,
+    heal: u32,
+    opponent: bool,
+    effect: CardEffect,
+    effect_duration: u8,
+) -> AttackOutcomes {
+    active_damage_effect_doutcome(damage, move |_, state, action| {
+        state.get_active_mut(action.actor).heal(heal);
+        let target = if opponent {
+            (action.actor + 1) % 2
+        } else {
+            action.actor
+        };
+        if let Some(pokemon) = state.in_play_pokemon[target][0].as_mut() {
+            pokemon.add_effect(effect.clone(), effect_duration);
+        }
     })
 }
 
