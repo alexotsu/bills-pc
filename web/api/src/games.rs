@@ -95,12 +95,35 @@ async fn create_game(
 
 #[derive(Deserialize)]
 pub struct ListGamesQuery {
-    /// `"win"` | `"loss"` | `"tie"` | `"incomplete"` (the last meaning `outcome is null`, not a
-    /// stored value — see the `GameRow` doc comment).
+    /// `"win"` | `"loss"` | `"tie"` | `"incomplete"` | `"completed"`. `"incomplete"` means
+    /// `outcome is null`; `"completed"` is its complement (`outcome is not null`, i.e. win/loss/
+    /// tie collapsed together) — used to back the history view's default "hide incomplete"
+    /// filter without the frontend needing to OR together three separate outcome values. Neither
+    /// is a stored value — see the `GameRow` doc comment.
+    ///
+    /// `"win"`/`"loss"` are interpreted **relative to `deck_id` when it's also given** (see
+    /// below), not relative to `deck_a`/seat 0 the way the stored column is — a game a deck lost
+    /// while playing as deck_b would otherwise never show up under that deck's own "Loss"
+    /// filter, since the raw column would say `"win"` (deck_a's result, not this deck's).
     outcome: Option<String>,
+    /// When given, also scopes `outcome`'s meaning: `"win"` means *this* deck won, `"loss"`
+    /// means it lost, regardless of whether it happened to be `deck_a` or `deck_b` in a given
+    /// game. Wins and losses belong to decks, not to the arbitrary "Player 1"/"Player 2" seat
+    /// assignment a game happened to start with.
     deck_id: Option<Uuid>,
+    /// Narrows further to games played specifically between `deck_id` and this deck (either
+    /// order) — backs the head-to-head matchup view. Requires `deck_id` to also be set; on its
+    /// own it wouldn't have a first deck to pair against.
+    opponent_deck_id: Option<Uuid>,
 }
 
+/// `outcome` here is always the raw, stored value — relative to `deck_a` (seat 0), *not*
+/// re-oriented around `deck_id` even when one was passed as a filter (unlike the filter itself,
+/// see `ListGamesQuery::outcome`). Consumers that need "did this deck win" for an arbitrary deck
+/// (including whichever one was filtered on) should compare `outcome` against `deck_a_id`/
+/// `deck_b_id` directly, e.g. `outcome == "win" ? deck_a_id : deck_b_id` is the winner — the web
+/// frontend's history view does exactly this to label rows by deck name rather than by a
+/// player-relative "Win"/"Loss" (see `web/frontend/src/app/games/page.tsx`).
 #[derive(Serialize, sqlx::FromRow)]
 pub struct GameListItem {
     id: Uuid,
@@ -121,32 +144,67 @@ async fn list_games(
     Query(params): Query<ListGamesQuery>,
 ) -> Result<Json<Vec<GameListItem>>, ApiError> {
     if let Some(outcome) = &params.outcome {
-        if outcome != "incomplete" && !VALID_OUTCOMES.contains(&outcome.as_str()) {
+        if outcome != "incomplete"
+            && outcome != "completed"
+            && !VALID_OUTCOMES.contains(&outcome.as_str())
+        {
             return Err(ApiError::BadRequest(format!(
-                "outcome must be one of: incomplete, {}",
+                "outcome must be one of: incomplete, completed, {}",
                 VALID_OUTCOMES.join(", ")
             )));
         }
     }
+    if params.opponent_deck_id.is_some() && params.deck_id.is_none() {
+        return Err(ApiError::BadRequest(
+            "opponent_deck_id requires deck_id".to_string(),
+        ));
+    }
 
+    // `deck_relative_outcome` flips win/loss when `deck_id` names `deck_b` for a given row, so
+    // the outer WHERE clause's `outcome` filter answers "did the *filtered* deck win/lose", not
+    // "did deck_a win/lose" — see the doc comments on `ListGamesQuery::outcome` and
+    // `GameListItem`. The final SELECT still returns the raw, deck_a-relative `outcome` column
+    // unchanged; only the filtering semantics are deck-relative here.
+    //
+    // The deck-matching clause has two modes: with just `deck_id`, a game matches if that deck
+    // played either side (the existing "games involving this deck" filter); with
+    // `opponent_deck_id` too, it narrows to games between *exactly* that pair, either order —
+    // the head-to-head matchup filter.
     let games = sqlx::query_as::<_, GameListItem>(
-        "select g.id, g.deck_a_id, da.name as deck_a_name, g.deck_b_id, db.name as deck_b_name, \
-                g.mode, g.outcome, g.seed, g.created_at, g.updated_at \
-         from games g \
-         join decks da on da.id = g.deck_a_id \
-         join decks db on db.id = g.deck_b_id \
-         where g.user_id = $1 \
-           and ( \
-             $2::text is null \
-             or ($2 = 'incomplete' and g.outcome is null) \
-             or g.outcome = $2 \
-           ) \
-           and ($3::uuid is null or g.deck_a_id = $3 or g.deck_b_id = $3) \
-         order by g.updated_at desc",
+        "with scoped as ( \
+           select g.id, g.deck_a_id, da.name as deck_a_name, g.deck_b_id, db.name as deck_b_name, \
+                  g.mode, g.outcome, g.seed, g.created_at, g.updated_at, \
+                  case \
+                    when $3::uuid is not null and g.deck_b_id = $3 then \
+                      case g.outcome when 'win' then 'loss' when 'loss' then 'win' else g.outcome end \
+                    else g.outcome \
+                  end as deck_relative_outcome \
+           from games g \
+           join decks da on da.id = g.deck_a_id \
+           join decks db on db.id = g.deck_b_id \
+           where g.user_id = $1 \
+             and ( \
+               ($4::uuid is null and ($3::uuid is null or g.deck_a_id = $3 or g.deck_b_id = $3)) \
+               or ($4::uuid is not null and ( \
+                 (g.deck_a_id = $3 and g.deck_b_id = $4) or (g.deck_a_id = $4 and g.deck_b_id = $3) \
+               )) \
+             ) \
+         ) \
+         select id, deck_a_id, deck_a_name, deck_b_id, deck_b_name, mode, outcome, seed, \
+                created_at, updated_at \
+         from scoped \
+         where ( \
+           $2::text is null \
+           or ($2 = 'incomplete' and deck_relative_outcome is null) \
+           or ($2 = 'completed' and deck_relative_outcome is not null) \
+           or deck_relative_outcome = $2 \
+         ) \
+         order by updated_at desc",
     )
     .bind(user.id)
     .bind(&params.outcome)
     .bind(params.deck_id)
+    .bind(params.opponent_deck_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -162,10 +220,28 @@ pub struct GamePlyRow {
     chosen_action: serde_json::Value,
 }
 
+/// Like `GameRow` but with deck names joined in, so the replay view can label the outcome by
+/// deck name (e.g. "Suicune Baxcalibur won") instead of a player-relative "Win"/"Loss" — same
+/// reasoning as `GameListItem`.
+#[derive(Serialize, sqlx::FromRow)]
+pub struct GameWithDeckNames {
+    id: Uuid,
+    user_id: Option<Uuid>,
+    deck_a_id: Uuid,
+    deck_a_name: String,
+    deck_b_id: Uuid,
+    deck_b_name: String,
+    mode: String,
+    outcome: Option<String>,
+    seed: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Serialize)]
 pub struct GameDetail {
     #[serde(flatten)]
-    game: GameRow,
+    game: GameWithDeckNames,
     plies: Vec<GamePlyRow>,
 }
 
@@ -178,7 +254,20 @@ async fn get_game(
     CurrentUser(user): CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let game = find_owned_game(&state.db, id, user.id).await?;
+    let game = sqlx::query_as::<_, GameWithDeckNames>(
+        "select g.id, g.user_id, g.deck_a_id, da.name as deck_a_name, g.deck_b_id, \
+                db.name as deck_b_name, g.mode, g.outcome, g.seed, g.created_at, g.updated_at \
+         from games g \
+         join decks da on da.id = g.deck_a_id \
+         join decks db on db.id = g.deck_b_id \
+         where g.id = $1 and g.user_id = $2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
     let plies = sqlx::query_as::<_, GamePlyRow>(
         "select ply, actor, state_json as state, playable_actions_json as playable_actions, \
                 chosen_action_json as chosen_action \

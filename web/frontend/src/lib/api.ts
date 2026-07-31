@@ -50,6 +50,21 @@ export type GameListItem = {
   updated_at: string;
 };
 
+/** `game.outcome` from `deckId`'s own perspective ("win"/"loss"/"tie"), or `null` if incomplete.
+ * The raw field is always stored relative to `deck_a` (see `GameListItem`'s counterpart doc
+ * comment in web/api/src/games.rs) — this re-derives it relative to whichever deck you actually
+ * care about, since a win for one deck is a loss for the other regardless of which seat either
+ * one started in. */
+export function outcomeForDeck(
+  game: Pick<GameListItem, "outcome" | "deck_a_id" | "deck_b_id">,
+  deckId: string,
+): GameOutcomeLabel | null {
+  if (game.outcome === null || game.outcome === "tie") return game.outcome;
+  const deckAWon = game.outcome === "win";
+  const isDeckA = game.deck_a_id === deckId;
+  return (isDeckA ? deckAWon : !deckAWon) ? "win" : "loss";
+}
+
 export type Game = {
   id: string;
   user_id: string | null;
@@ -73,7 +88,11 @@ export type GamePly = {
   chosen_action: unknown;
 };
 
-export type GameDetail = Game & { plies: GamePly[] };
+export type GameDetail = Game & {
+  deck_a_name: string;
+  deck_b_name: string;
+  plies: GamePly[];
+};
 
 export class ApiRequestError extends Error {
   constructor(
@@ -236,12 +255,18 @@ export function updateGameOutcome(
 }
 
 export function fetchGames(filters?: {
-  outcome?: GameOutcomeLabel | "incomplete";
+  /** `"completed"` = win/loss/tie collapsed together (i.e. "not incomplete") — backs the
+   * history view's default filter. See `ListGamesQuery` in web/api/src/games.rs. */
+  outcome?: GameOutcomeLabel | "incomplete" | "completed";
   deckId?: string;
+  /** Narrows to games played specifically between `deckId` and this deck (either seat order) —
+   * backs the head-to-head matchup view. Requires `deckId` to also be set. */
+  opponentDeckId?: string;
 }): Promise<GameListItem[]> {
   const params = new URLSearchParams();
   if (filters?.outcome) params.set("outcome", filters.outcome);
   if (filters?.deckId) params.set("deck_id", filters.deckId);
+  if (filters?.opponentDeckId) params.set("opponent_deck_id", filters.opponentDeckId);
   const query = params.toString();
   return request<GameListItem[]>(`/api/games${query ? `?${query}` : ""}`);
 }

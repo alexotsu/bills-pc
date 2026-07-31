@@ -174,6 +174,27 @@ async fn create_game_persists_and_returns_it(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn get_game_includes_deck_names(pool: PgPool) {
+    // Deck names let the frontend label the outcome by deck ("Deck A won") instead of a
+    // player-relative "Win"/"Loss" — get_game needs to join them in just like list_games does.
+    let app = test_app(pool);
+    let (cookie, _) = register(&app, "detailnames@example.com").await;
+    let deck_a = create_deck(&app, &cookie, "Deck A").await;
+    let deck_b = create_deck(&app, &cookie, "Deck B").await;
+    let game = create_game(&app, &cookie, deck_a, deck_b).await;
+    let game_id: Uuid = serde_json::from_value(game["id"].clone()).unwrap();
+
+    let detail = json_body(
+        app.oneshot(get(&format!("/api/games/{game_id}"), &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["deck_a_name"], "Deck A");
+    assert_eq!(detail["deck_b_name"], "Deck B");
+}
+
+#[sqlx::test]
 async fn create_game_without_login_is_unauthorized(pool: PgPool) {
     let app = test_app(pool);
     let response = app
@@ -452,7 +473,8 @@ async fn list_games_filters_by_outcome_and_incomplete(pool: PgPool) {
     assert_eq!(win_ids, vec![won_id]);
 
     let incomplete_only = json_body(
-        app.oneshot(get("/api/games?outcome=incomplete", &cookie))
+        app.clone()
+            .oneshot(get("/api/games?outcome=incomplete", &cookie))
             .await
             .unwrap(),
     )
@@ -464,6 +486,172 @@ async fn list_games_filters_by_outcome_and_incomplete(pool: PgPool) {
         .map(|g| serde_json::from_value(g["id"].clone()).unwrap())
         .collect();
     assert_eq!(incomplete_ids, vec![unfinished_id]);
+
+    // "completed" is incomplete's complement (outcome is not null) — backs the history view's
+    // default "hide incomplete" filter.
+    let completed_only = json_body(
+        app.oneshot(get("/api/games?outcome=completed", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let completed_ids: Vec<Uuid> = completed_only
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| serde_json::from_value(g["id"].clone()).unwrap())
+        .collect();
+    assert_eq!(completed_ids, vec![won_id]);
+}
+
+#[sqlx::test]
+async fn list_games_outcome_filter_is_relative_to_the_filtered_deck(pool: PgPool) {
+    // deck_a beat deck_b (stored outcome is "win", relative to deck_a/seat 0). From deck_b's own
+    // perspective that's a loss — filtering by deck_b should surface it under "loss", not "win",
+    // even though the raw column never changes. A win for one deck is a loss for the other; it
+    // shouldn't matter which one happened to be "Player 1" that game.
+    let app = test_app(pool);
+    let (cookie, _) = register(&app, "deckrelative@example.com").await;
+    let deck_a = create_deck(&app, &cookie, "Winner Deck").await;
+    let deck_b = create_deck(&app, &cookie, "Loser Deck").await;
+
+    let game = create_game(&app, &cookie, deck_a, deck_b).await;
+    let game_id: Uuid = serde_json::from_value(game["id"].clone()).unwrap();
+    app.clone()
+        .oneshot(patch_json(
+            &format!("/api/games/{game_id}"),
+            &cookie,
+            json!({ "outcome": "win" }),
+        ))
+        .await
+        .unwrap();
+
+    let fetch_ids = |app: axum::Router, uri: String, cookie: String| async move {
+        let body = json_body(app.oneshot(get(&uri, &cookie)).await.unwrap()).await;
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|g| serde_json::from_value::<Uuid>(g["id"].clone()).unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    // deck_a ("Winner Deck") really did win.
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?outcome=win&deck_id={deck_a}"),
+            cookie.clone()
+        )
+        .await,
+        vec![game_id]
+    );
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?outcome=loss&deck_id={deck_a}"),
+            cookie.clone()
+        )
+        .await,
+        Vec::<Uuid>::new()
+    );
+
+    // deck_b ("Loser Deck") lost — flipped relative to the raw, deck_a-relative stored value.
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?outcome=loss&deck_id={deck_b}"),
+            cookie.clone()
+        )
+        .await,
+        vec![game_id]
+    );
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?outcome=win&deck_id={deck_b}"),
+            cookie.clone()
+        )
+        .await,
+        Vec::<Uuid>::new()
+    );
+
+    // Regardless of which deck was filtered on, the returned `outcome` field itself stays raw
+    // (relative to deck_a) — see the doc comment on `GameListItem`.
+    let filtered_by_b = json_body(
+        app.oneshot(get(
+            &format!("/api/games?outcome=loss&deck_id={deck_b}"),
+            &cookie,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(filtered_by_b[0]["outcome"], "win");
+}
+
+#[sqlx::test]
+async fn list_games_opponent_deck_id_narrows_to_the_exact_matchup(pool: PgPool) {
+    // Backs the head-to-head matchup view: given two decks, only games played specifically
+    // between *that pair* (either seat order), not every game either deck happened to be in.
+    let app = test_app(pool);
+    let (cookie, _) = register(&app, "matchup@example.com").await;
+    let deck_a = create_deck(&app, &cookie, "Deck A").await;
+    let deck_b = create_deck(&app, &cookie, "Deck B").await;
+    let deck_c = create_deck(&app, &cookie, "Deck C").await;
+
+    // A vs B, with A in deck_a's seat.
+    let game_a_vs_b = create_game(&app, &cookie, deck_a, deck_b).await;
+    let game_a_vs_b_id: Uuid = serde_json::from_value(game_a_vs_b["id"].clone()).unwrap();
+    // A vs B again, seats flipped (B in deck_a's seat this time).
+    let game_b_vs_a = create_game(&app, &cookie, deck_b, deck_a).await;
+    let game_b_vs_a_id: Uuid = serde_json::from_value(game_b_vs_a["id"].clone()).unwrap();
+    // A vs C — same deck_a (A) as the first game, but not the A-vs-B matchup.
+    create_game(&app, &cookie, deck_a, deck_c).await;
+
+    let fetch_ids = |app: axum::Router, uri: String, cookie: String| async move {
+        let body = json_body(app.oneshot(get(&uri, &cookie)).await.unwrap()).await;
+        let mut ids: Vec<Uuid> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| serde_json::from_value(g["id"].clone()).unwrap())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let mut expected = vec![game_a_vs_b_id, game_b_vs_a_id];
+    expected.sort();
+
+    // Order-agnostic: filtering by (A, B) or (B, A) returns the same two games.
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?deck_id={deck_a}&opponent_deck_id={deck_b}"),
+            cookie.clone()
+        )
+        .await,
+        expected
+    );
+    assert_eq!(
+        fetch_ids(
+            app.clone(),
+            format!("/api/games?deck_id={deck_b}&opponent_deck_id={deck_a}"),
+            cookie.clone()
+        )
+        .await,
+        expected
+    );
+
+    // opponent_deck_id without deck_id doesn't have a first deck to pair against.
+    let response = app
+        .oneshot(get(
+            &format!("/api/games?opponent_deck_id={deck_b}"),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]

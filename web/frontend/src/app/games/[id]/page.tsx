@@ -63,8 +63,11 @@ export default function GameReplayPage() {
       </div>
 
       <div className="flex flex-wrap gap-4 text-sm text-zinc-600 dark:text-zinc-400">
+        <span>
+          {game.deck_a_name} <span className="text-zinc-400">vs</span> {game.deck_b_name}
+        </span>
         <span>Mode: {game.mode}</span>
-        <span>Outcome: {game.outcome ?? "incomplete"}</span>
+        <span>{outcomeLabel(game)}</span>
         <span>Started: {new Date(game.created_at).toLocaleString()}</span>
       </div>
 
@@ -77,6 +80,16 @@ export default function GameReplayPage() {
       )}
     </main>
   );
+}
+
+/** Names the winning deck rather than showing a bare "Win"/"Loss" — `game.outcome` is stored
+ * relative to `deck_a`/"Player 1" (see the `GameWithDeckNames` doc comment in
+ * web/api/src/games.rs), an assignment that's arbitrary per game; a win for deck_a is a loss for
+ * deck_b and vice versa, so the outcome belongs to a deck, not to whichever seat it started in. */
+function outcomeLabel(game: GameDetail): string {
+  if (game.outcome === null) return "Incomplete";
+  if (game.outcome === "tie") return "Tie";
+  return `${game.outcome === "win" ? game.deck_a_name : game.deck_b_name} won`;
 }
 
 function Replay({
