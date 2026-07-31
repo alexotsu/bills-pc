@@ -432,6 +432,38 @@ Trainer: 12
     }
 
     #[test]
+    fn placing_a_basic_as_the_initial_action_succeeds() {
+        // Regression test for a reported "memory access out of bounds" wasm crash when placing
+        // a Basic Pokémon as the very first action of a fresh game (the opening
+        // "choose your Active" setup decision). A wide fuzz pass against a freshly rebuilt wasm
+        // binary (2880 real games, thousands of real Place-into-active submissions) found no
+        // crash, pointing at a stale/mismatched wasm-pkg build being served rather than an
+        // engine bug — see the `dev.sh` staleness-detection fix alongside this test. This test
+        // still pins down the exact scenario at the engine level: the first decision after
+        // construction is legal, and submitting it doesn't panic or error.
+        let mut game =
+            WasmGame::new_inner(DECK_A, DECK_B, 42, false, -1, true).expect("should construct");
+
+        let pending = game.game.step();
+        let PendingDecision::AwaitingAction { actor, ref actions } = pending else {
+            panic!("expected the opening 'choose your Active' decision, got {pending:?}");
+        };
+        assert!(
+            actions
+                .iter()
+                .all(|a| matches!(a.action, deckgym::actions::SimpleAction::Place(_, 0))),
+            "expected every legal action to be placing a Basic into the active slot, got {actions:?}"
+        );
+
+        let place_action = actions[0].clone();
+        let after = game
+            .submit_action_inner(place_action)
+            .expect("placing a basic as the initial action should be legal");
+        assert_ne!(after, pending);
+        assert!(game.game.get_state_clone().in_play_pokemon[actor][0].is_some());
+    }
+
+    #[test]
     fn declare_winner_supports_tie() {
         let mut game = new_game();
         let pending = game.declare_winner_inner(GameOutcome::Tie);

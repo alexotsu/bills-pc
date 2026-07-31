@@ -7,8 +7,11 @@
 # the single source of truth and nobody has to remember a growing manual checklist.
 #
 # Usage: ./dev.sh [--rebuild-wasm]
-#   --rebuild-wasm   Force a wasm-pack rebuild of engine-wasm even if public/wasm-pkg already
-#                     has output. Do this after changing engine-wasm or the root deckgym crate.
+#   --rebuild-wasm   Force a wasm-pack rebuild of engine-wasm even if public/wasm-pkg looks
+#                     up to date. Normally not needed -- a stale build (source newer than the
+#                     last build) is detected and rebuilt automatically; this is only for
+#                     forcing it regardless (e.g. after a `wasm-opt`/toolchain change that
+#                     wouldn't show up as a source-file mtime change).
 
 set -euo pipefail
 # Job control: makes each `... &` background job below the leader of its own new process
@@ -116,7 +119,22 @@ fi
 
 # --- 6. wasm-pkg -----------------------------------------------------------------------------
 
-if [ "$REBUILD_WASM" = true ] || [ ! -f frontend/public/wasm-pkg/engine_wasm_bg.wasm ]; then
+wasm_artifact="frontend/public/wasm-pkg/engine_wasm_bg.wasm"
+
+# Beyond "does the artifact exist at all", also rebuild if it's *stale*: any engine-wasm or root
+# deckgym crate source file newer than the last build. Without this, editing engine-wasm (or the
+# root engine it wraps) and re-running ./dev.sh silently keeps serving the old .wasm -- the
+# frontend's TS already expects the new shapes (new WasmGame constructor params, new
+# PendingDecision variants, etc.), and calling into a mismatched old build through that generated
+# glue is exactly what produced a real "memory access out of bounds" crash once. `--rebuild-wasm`
+# is still there as an explicit escape hatch, but shouldn't be needed for this case anymore.
+wasm_is_stale() {
+  [ -f "$wasm_artifact" ] || return 0
+  find engine-wasm/src engine-wasm/Cargo.toml ../src ../Cargo.toml \
+    -type f -newer "$wasm_artifact" -print -quit 2>/dev/null | grep -q .
+}
+
+if [ "$REBUILD_WASM" = true ] || wasm_is_stale; then
   log "Building engine-wasm..."
   if ! command -v wasm-pack >/dev/null 2>&1; then
     echo "wasm-pack not found. Install it: cargo install wasm-pack" >&2
