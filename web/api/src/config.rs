@@ -22,6 +22,12 @@ pub struct Config {
     /// real (HTTPS) deployment; defaults to false so local http://localhost dev works without
     /// extra setup — a `Secure` cookie is never sent back over plain HTTP.
     pub cookie_secure: bool,
+    /// Base URL of the external host serving card art (e.g. an S3/R2 bucket or image CDN) —
+    /// deliberately not stored in this repo (see `cards.rs`'s `image_url`): official TCG art is
+    /// under a license this repo doesn't hold, and committed image files would also bloat the
+    /// git history. `None` until a host is chosen, in which case `image_url` stays `None` for
+    /// every card and the frontend falls back to its plain name box.
+    pub card_image_base_url: Option<String>,
 }
 
 impl Config {
@@ -42,6 +48,7 @@ impl Config {
             cookie_secure: std::env::var("COOKIE_SECURE")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            card_image_base_url: std::env::var("CARD_IMAGE_BASE_URL").ok(),
         }
     }
 }

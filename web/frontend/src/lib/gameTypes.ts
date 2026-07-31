@@ -61,6 +61,16 @@ export function cardName(card: Card): string {
   return isPokemonCard(card) ? card.Pokemon.name : card.Trainer.name;
 }
 
+/** Card art is hosted externally (never committed to this repo — see web/api/.env.example's
+ * CARD_IMAGE_BASE_URL for why) at "<base>/<id-with-hyphens>.png". `null` until
+ * NEXT_PUBLIC_CARD_IMAGE_BASE_URL is configured, same as the API's `image_url` field it mirrors
+ * (see `card_image_url` in web/api/src/cards.rs) — this copy exists because the live game board
+ * renders straight from wasm state and never gets that field from a `/api/cards` round trip. */
+export function cardImageSrc(id: string): string | null {
+  const baseUrl = process.env.NEXT_PUBLIC_CARD_IMAGE_BASE_URL;
+  return baseUrl ? `${baseUrl}/${id.replace(" ", "-")}.png` : null;
+}
+
 /** `card.rs`'s `is_ex()`/`is_mega()` are computed, not stored fields — mirrored here exactly. */
 export function isExCard(name: string): boolean {
   const lastWord = name.toLowerCase().trim().split(" ").pop();

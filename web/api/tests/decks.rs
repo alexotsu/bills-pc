@@ -43,6 +43,7 @@ fn test_config() -> Config {
         },
         frontend_url: "http://localhost:3000".to_string(),
         cookie_secure: false,
+        card_image_base_url: None,
     }
 }
 

@@ -1,4 +1,5 @@
-import { cardName, type Card } from "@/lib/gameTypes";
+import { useState } from "react";
+import { cardImageSrc, cardName, isPokemonCard, type Card } from "@/lib/gameTypes";
 
 export type CardFaceSize = "md" | "sm";
 
@@ -23,10 +24,34 @@ export default function CardFace({
   size?: CardFaceSize;
 }) {
   const dims = SIZE_CLASSES[size];
+  const id = isPokemonCard(card) ? card.Pokemon.id : card.Trainer.id;
+  const src = cardImageSrc(id);
+  // Resets whenever the underlying card changes, since a broken-image flag from a previous card
+  // rendered in this same slot must not stick around and suppress art for the new one. Adjusting
+  // state during render (rather than in an effect) is the React-recommended way to do this — see
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [imgFailed, setImgFailed] = useState(false);
+  const [lastId, setLastId] = useState(id);
+  if (id !== lastId) {
+    setLastId(id);
+    setImgFailed(false);
+  }
+
   if (!revealed) {
     return (
       <div
         className={`shrink-0 rounded border border-zinc-400 bg-zinc-200 dark:border-zinc-600 dark:bg-zinc-800 ${dims}`}
+      />
+    );
+  }
+  if (src && !imgFailed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- external host, not yet known at build time
+      <img
+        src={src}
+        alt={cardName(card)}
+        onError={() => setImgFailed(true)}
+        className={`shrink-0 rounded border border-zinc-300 object-cover dark:border-zinc-700 ${dims}`}
       />
     );
   }

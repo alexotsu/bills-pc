@@ -182,15 +182,19 @@ export default function DeckBuilder({
 }
 
 function CardThumbnail({ card }: { card: Pick<CardCatalogEntry, "name" | "image_url"> }) {
-  if (card.image_url) {
+  // Cards get art uploaded to the external host one at a time, so `image_url` being set doesn't
+  // guarantee that particular file exists yet — falls back to the placeholder box on a 404
+  // rather than showing a broken-image icon.
+  const [imgFailed, setImgFailed] = useState(false);
+  if (card.image_url && !imgFailed) {
     return (
-      // Real URLs aren't wired up yet (see CardCatalogEntry.image_url in web/api/src/cards.rs);
-      // plain <img> avoids needing to allow-list an image host in next.config.ts for a field
-      // that's still always null — revisit with next/image once that's populated.
+      // Host isn't known at build time (see CARD_IMAGE_BASE_URL in web/api/.env.example), so
+      // this can't use next/image's remotePatterns allow-list; plain <img> instead.
       // eslint-disable-next-line @next/next/no-img-element
       <img
         src={card.image_url}
         alt={card.name}
+        onError={() => setImgFailed(true)}
         className="h-14 w-10 shrink-0 rounded object-cover"
       />
     );
