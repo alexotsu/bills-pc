@@ -17,7 +17,7 @@ use crate::{
 
 /// This represents a card in the mat. Has a pointer to the card
 /// description, but captures the extra variable properties while in mat.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Deserialize)]
 pub struct PlayedCard {
     pub card: Card,
     damage_counters: u32,
@@ -400,6 +400,66 @@ impl PlayedCard {
     }
 }
 
+/// Hand-written rather than derived so the JSON also carries `effective_total_hp` — computed
+/// fresh via `get_effective_total_hp()` (the same method attack/KO resolution uses internally)
+/// rather than storing it as a real field. Without this, external consumers of the serialized
+/// state (namely the web frontend) only see the raw `base_hp`/`stadium_hp_bonus` fields and have
+/// to re-derive tool/ability HP bonuses (Giant Cape, Leaf Cape, Reuniclus's Infinite Increase,
+/// etc.) themselves — which is exactly how the web UI's HP bar drifted out of sync with the
+/// engine's own numbers and stopped reflecting HP-boosting tools at all.
+impl Serialize for PlayedCard {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct PlayedCardWire<'a> {
+            card: &'a Card,
+            damage_counters: u32,
+            base_hp: u32,
+            stadium_hp_bonus: u32,
+            effective_total_hp: u32,
+            attached_energy: &'a Vec<EnergyType>,
+            attached_tool: &'a Option<Card>,
+            played_this_turn: bool,
+            moved_to_active_this_turn: bool,
+            ability_used: bool,
+            poisoned: bool,
+            paralyzed: bool,
+            asleep: bool,
+            burned: bool,
+            confused: bool,
+            cards_behind: &'a Vec<Card>,
+            prevent_first_attack_damage_used: bool,
+            has_attacked_since_play: bool,
+            effects: &'a Vec<(CardEffect, u8)>,
+        }
+
+        PlayedCardWire {
+            card: &self.card,
+            damage_counters: self.damage_counters,
+            base_hp: self.base_hp,
+            stadium_hp_bonus: self.stadium_hp_bonus,
+            effective_total_hp: self.get_effective_total_hp(),
+            attached_energy: &self.attached_energy,
+            attached_tool: &self.attached_tool,
+            played_this_turn: self.played_this_turn,
+            moved_to_active_this_turn: self.moved_to_active_this_turn,
+            ability_used: self.ability_used,
+            poisoned: self.poisoned,
+            paralyzed: self.paralyzed,
+            asleep: self.asleep,
+            burned: self.burned,
+            confused: self.confused,
+            cards_behind: &self.cards_behind,
+            prevent_first_attack_damage_used: self.prevent_first_attack_damage_used,
+            has_attacked_since_play: self.has_attacked_since_play,
+            effects: &self.effects,
+        }
+        .serialize(serializer)
+    }
+}
+
 impl fmt::Debug for PlayedCard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if f.alternate() {
@@ -430,10 +490,43 @@ pub fn has_serperior_jungle_totem(state: &State, player: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::PlayedCard;
     use crate::{
         card_ids::CardId, database::get_card_by_enum, hooks::to_playable_card,
         models::has_serperior_jungle_totem, state::State,
     };
+
+    /// Regression test: a Pokémon Tool that boosts HP (e.g. Giant Cape, +20) is correctly
+    /// reflected by `get_effective_total_hp()` (gameplay already covered by
+    /// `tests/tools/tools_integration_test.rs`), but that alone doesn't guarantee it's visible
+    /// to anything reading the *serialized* state — `PlayedCard`'s JSON only exposed the raw
+    /// `base_hp`/`stadium_hp_bonus` fields, so the web frontend (which renders the HP bar from
+    /// JSON, not by calling back into the engine) silently ignored tool-based HP bonuses. This
+    /// pins down that the JSON itself carries the correct, boosted number.
+    #[test]
+    fn serialized_played_card_reflects_hp_boosting_tool() {
+        let bare = PlayedCard::from_id(CardId::A1001Bulbasaur);
+        let base_hp = bare.get_effective_total_hp();
+
+        let with_giant_cape = bare
+            .clone()
+            .with_tool(get_card_by_enum(CardId::A2147GiantCape));
+        assert_eq!(
+            with_giant_cape.get_effective_total_hp(),
+            base_hp + 20,
+            "sanity check: Giant Cape should still boost effective total HP by 20"
+        );
+
+        let json = serde_json::to_value(&with_giant_cape).expect("should serialize");
+        assert_eq!(
+            json["effective_total_hp"],
+            base_hp + 20,
+            "serialized effective_total_hp should include the Giant Cape bonus, got {json}"
+        );
+        // The raw fields are still present too (other Rust-side code, and any external
+        // deserializer, still gets them) — just no longer the only way to learn the total.
+        assert_eq!(json["base_hp"], base_hp);
+    }
 
     #[test]
     fn test_has_serperior_jungle_totem_with_serperior() {

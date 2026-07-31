@@ -69,13 +69,18 @@ export function isExCard(name: string): boolean {
 
 /** A Pokémon currently in play (active or bench). `damage_counters`/`base_hp`/`stadium_hp_bonus`
  * and the 5 status booleans are private fields in Rust but still serialize — see
- * `src/state/played_card.rs`. Remaining HP isn't a stored field; compute it like the engine does
- * (`get_remaining_hp` = effective total HP minus damage) via `remainingHp` below. */
+ * `src/state/played_card.rs`. `effective_total_hp` is computed engine-side (`base_hp` plus any
+ * HP-boosting tool/ability bonus, e.g. Giant Cape, Leaf Cape, Reuniclus's Infinite Increase) via
+ * `get_effective_total_hp()` — use it (through `effectiveTotalHp` below) rather than deriving
+ * total HP from `base_hp`/`stadium_hp_bonus` here, which would silently miss those bonuses.
+ * Remaining HP isn't a stored field; compute it like the engine does (`get_remaining_hp` =
+ * effective total HP minus damage) via `remainingHp` below. */
 export type PlayedCard = {
   card: Card;
   damage_counters: number;
   base_hp: number;
   stadium_hp_bonus: number;
+  effective_total_hp: number;
   attached_energy: EnergyType[];
   attached_tool: Card | null;
   played_this_turn: boolean;
@@ -94,7 +99,7 @@ export type PlayedCard = {
 };
 
 export function effectiveTotalHp(played: PlayedCard): number {
-  return played.base_hp + played.stadium_hp_bonus;
+  return played.effective_total_hp;
 }
 
 export function remainingHp(played: PlayedCard): number {
