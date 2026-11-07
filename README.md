@@ -2,7 +2,7 @@
 
 # deckgym-core: Pokémon TCG Pocket Simulator
 
-![Card Implemented](https://img.shields.io/badge/Cards_Implemented-3318_%2F_3761_%2888.2%25%29-green)
+![Card Implemented](https://img.shields.io/badge/Cards_Implemented-3340_%2F_3761_%2888.8%25%29-green)
 
 **deckgym-core** is a high-performance Rust library designed for simulating Pokémon TCG Pocket games. It features a command-line interface (CLI) capable of running 10,000 simulations in approximately 3 seconds. This is the library that powers https://www.deckgym.com.
 
@@ -97,6 +97,61 @@ The JSON format makes it easy to:
 - Perform imitation learning
 - Build custom machine learning models
 - Analyze gameplay patterns and statistics
+
+## Replay Recording (Web Viewer)
+
+The simulator can record one JSON replay file per game: a full board snapshot at every decision
+point plus the legal options and the action that was chosen. These replays are meant to be opened
+in the web viewer under `viewer/` (see `viewer/README.md`), which steps through the game with
+animated transitions.
+
+```bash
+cargo run simulate example_decks/venusaur-exeggutor.txt example_decks/weezing-arbok.txt \
+  -n 3 --players r,r --replay-dir replays/
+```
+
+Use `--replay-sample N` to only write replays for the first N games of a run (useful when running
+many simulations but only wanting a few to inspect):
+
+```bash
+cargo run simulate example_decks/venusaur-exeggutor.txt example_decks/weezing-arbok.txt \
+  -n 1000 --players r,r --replay-dir replays/ --replay-sample 10
+```
+
+### Play one game and open it in the viewer
+
+`play` is a shortcut for the "run one game, then go look at it" loop: it plays exactly one game,
+writes its replay, prints a winner/points summary, and prints a `viewer` URL as its last line.
+
+```bash
+cd viewer && npm run dev        # leave this running in one terminal
+```
+```bash
+# in another terminal, from the repo root
+cargo run -- play example_decks/venusaur-exeggutor.txt example_decks/weezing-arbok.txt --players e2,r
+```
+
+Ctrl+Click (or Cmd+Click, depending on your terminal) the printed link to open that game in the
+viewer — see [`viewer/README.md`](./viewer/README.md#playing-one-game-and-opening-it-straight-from-the-terminal)
+for how that link resolves and its other flags (`--seed`, `--bot-a`/`--bot-b`, `--replay-dir`,
+`--viewer-url`).
+
+## External Bots
+
+A bot written in any language can play as either seat, talking to the engine over stdin/stdout in
+JSON lines. Give that seat the player code `x` and point `--bot-a`/`--bot-b` at the command to run:
+
+```bash
+cargo run simulate example_decks/venusaur-exeggutor.txt example_decks/weezing-arbok.txt \
+  -n 1 --players r,x --bot-b "python3 examples/bots/random_bot.py"
+```
+
+`examples/bots/random_bot.py` is a minimal, stdlib-only example bot (picks a random legal action
+and attaches a short note explaining its pick). See [`docs/bot-protocol.md`](./docs/bot-protocol.md)
+for the full wire protocol, including the message schemas and how failures (timeouts, invalid
+replies, a crashed process) are handled. `--bot-timeout-ms` (default 10000) controls how long the
+engine waits for one decision. A bot's notes, when set, are stored in `--replay-dir` replays and
+shown in the [web viewer](./viewer/README.md)'s options panel.
 
 ## Contributing
 
@@ -201,20 +256,46 @@ The pre-commit hook runs:
 
 This helps maintain code quality and prevents broken commits, but it's optional and each developer can choose whether to enable it.
 
+**Dual Fusion catalog and implementation work**
+
+The catalog includes Dual Fusion (C1), Special Pack: First Partners (SP1), and
+P-C promos, including all alternate printings. Catalog presence does not imply
+that a card's rules are implemented. Use `cargo run --bin card_status --
+--incomplete-only` to find pending effects, then the incremental generators below
+to add attack and ability mappings. New Trainer designs still awaiting rules are
+listed explicitly in `tests/trainers/trainer_reprints_test.rs`; remove an entry
+when implementing that design.
+
+Printed dual types are available through `Card::get_types()` and `Card::is_type()`
+in every zone, and through `PlayedCard` type queries in play. Use these queries
+instead of comparing the primary `PokemonCard::energy_type` field. Existing
+single-type JSON remains valid; struct literals must provide
+`secondary_energy_type: None` for single-type Pokémon.
+
 **Generating database.rs**
 
-Ensure database.json is up-to-date with latest data. Mock the `get_card_by_enum` in `database.rs` with a `_ => panic` so that
-it compiles mid-way through the generation.
+Ensure `database.json` is up to date, then build the generator once while the
+existing Rust source files still agree. The executable reads JSON at runtime, so
+both new files can be generated without compiling an inconsistent intermediate
+state. No temporary placeholder card implementation is needed.
 
 ```bash
-cargo run --bin card_enum_generator > tmp.rs && mv tmp.rs src/card_ids.rs && cargo fmt
+cargo build --bin card_enum_generator
+./target/debug/card_enum_generator > card_ids.next.rs
+./target/debug/card_enum_generator --database > database.next.rs
+rustfmt --edition 2021 card_ids.next.rs database.next.rs
+# Replace sources only after both generation commands and formatting succeed.
+mv card_ids.next.rs src/card_ids.rs
+mv database.next.rs src/database.rs
+cargo fmt
+cargo test --features "tui test-utils" --all-targets
 ```
 
-Then temporarily edit `database.rs` for `_` to match Bulbasaur (this is so that the next code can compile-run).
-
-```bash
-cargo run --bin card_enum_generator -- --database > tmp.rs && mv tmp.rs src/database.rs && cargo fmt
-```
+The commands above use a Bash-compatible shell. In Windows PowerShell, use the
+`.exe` executable and UTF-8 output (PowerShell 7), not PowerShell 5's UTF-16
+redirection. If Cargo uses a custom target directory, obtain it with
+`cargo metadata --no-deps --format-version 1` and use its debug executable.
+Generated lookup functions are bounded so large catalogs also format on Windows.
 
 To generate attacks do (first time):
 ```bash

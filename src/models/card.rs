@@ -23,6 +23,19 @@ pub enum EnergyType {
     Colorless,
 }
 impl EnergyType {
+    /// The 8 Energy types the Energy Zone can generate, i.e. the ones a deck can be built
+    /// around. See `is_selectable`.
+    pub const SELECTABLE: [EnergyType; 8] = [
+        EnergyType::Grass,
+        EnergyType::Fire,
+        EnergyType::Water,
+        EnergyType::Lightning,
+        EnergyType::Psychic,
+        EnergyType::Fighting,
+        EnergyType::Darkness,
+        EnergyType::Metal,
+    ];
+
     pub(crate) fn from_str(energy_type: &str) -> Option<Self> {
         match energy_type {
             "Grass" => Some(EnergyType::Grass),
@@ -37,6 +50,16 @@ impl EnergyType {
             "Colorless" => Some(EnergyType::Colorless),
             _ => None,
         }
+    }
+
+    /// Whether a deck can be built around this energy, i.e. whether the Energy Zone
+    /// can generate it.
+    ///
+    /// Dragon and Colorless cannot. Colorless only ever appears as an attack cost
+    /// (payable by any energy), and there is no Dragon energy in the game — Dragon
+    /// Pokemon are powered by other types.
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, EnergyType::Dragon | EnergyType::Colorless)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -82,6 +105,9 @@ pub struct PokemonCard {
     pub evolves_from: Option<String>,
     pub hp: u32,
     pub energy_type: EnergyType,
+    /// Second printed Pokémon type; independent of attached Energy and attack costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_energy_type: Option<EnergyType>,
     pub ability: Option<Ability>,
     pub attacks: Vec<Attack>,
     pub weakness: Option<EnergyType>,
@@ -89,6 +115,22 @@ pub struct PokemonCard {
     pub rarity: String,
     pub booster_pack: String,
 }
+impl PokemonCard {
+    pub fn get_types(&self) -> Vec<EnergyType> {
+        let mut types = vec![self.energy_type];
+        if let Some(secondary) = self.secondary_energy_type {
+            if !types.contains(&secondary) {
+                types.push(secondary);
+            }
+        }
+        types
+    }
+
+    pub fn is_type(&self, energy_type: EnergyType) -> bool {
+        self.energy_type == energy_type || self.secondary_energy_type == Some(energy_type)
+    }
+}
+
 impl PartialEq for PokemonCard {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -217,10 +259,26 @@ impl Card {
         }
     }
 
-    pub(crate) fn get_type(&self) -> Option<EnergyType> {
+    /// The Energy types this card is **printed** as.
+    ///
+    /// Includes both printed types for dual-type Pokémon.
+    ///
+    /// Note this is the *printed* type set — it deliberately knows nothing about Abilities, which
+    /// only apply while the card is in play. Use it for cards in a deck, hand or discard pile;
+    /// use `PlayedCard::get_energy_types` for cards on the board.
+    pub fn get_types(&self) -> Vec<EnergyType> {
         match self {
-            Card::Pokemon(pokemon_card) => Some(pokemon_card.energy_type),
-            _ => None,
+            Card::Pokemon(pokemon_card) => pokemon_card.get_types(),
+            _ => vec![],
+        }
+    }
+
+    /// Whether this card's **printed** type set contains `energy_type`. Allocation-free
+    /// counterpart of `get_types().contains(..)`.
+    pub fn is_type(&self, energy_type: EnergyType) -> bool {
+        match self {
+            Card::Pokemon(pokemon_card) => pokemon_card.is_type(energy_type),
+            _ => false,
         }
     }
 
@@ -251,6 +309,11 @@ impl Card {
 
     /// Check if this card can evolve into the given evolution card
     /// This handles special evolution rules like Eevee ex's Veevee 'volve ability
+    ///
+    /// This is a card-level evolution-legality rule with no access to the board, so the Veevee
+    /// 'volve lookup below stays card-level too: it is deliberately *not* gated on Alolan Muk's
+    /// Power of Alchemy, even though Eevee ex is a Basic. Making it board-aware would mean
+    /// threading `State` (or a `PlayedCard`) through every evolution-legality caller.
     pub fn can_evolve_into(&self, evolution_card: &Card) -> bool {
         if let Card::Pokemon(evolution_pokemon) = evolution_card {
             if let Some(evolves_from) = &evolution_pokemon.evolves_from {

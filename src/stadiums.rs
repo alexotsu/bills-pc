@@ -54,6 +54,10 @@ static SOOTHING_SHORE_EFFECT: LazyLock<String> =
     LazyLock::new(|| stadium_effect_text_from_card_id(CardId::B4154SoothingShore));
 static RAINBOW_CAVE_EFFECT: LazyLock<String> =
     LazyLock::new(|| stadium_effect_text_from_card_id(CardId::B4155RainbowCave));
+static ARCADE_EFFECT: LazyLock<String> =
+    LazyLock::new(|| stadium_effect_text_from_card_id(CardId::B4a072Arcade));
+static ABANDONED_STATION_EFFECT: LazyLock<String> =
+    LazyLock::new(|| stadium_effect_text_from_card_id(CardId::C1131AbandonedStation));
 
 pub fn is_stadium_effect_implemented(trainer_card: &TrainerCard) -> bool {
     ensure_stadium_trainer(trainer_card);
@@ -72,6 +76,8 @@ pub fn is_stadium_effect_implemented(trainer_card: &TrainerCard) -> bool {
             || e == KIDS_ROOM_EFFECT.as_str()
             || e == SOOTHING_SHORE_EFFECT.as_str()
             || e == RAINBOW_CAVE_EFFECT.as_str()
+            || e == ARCADE_EFFECT.as_str()
+            || e == ABANDONED_STATION_EFFECT.as_str()
     )
 }
 
@@ -118,8 +124,10 @@ pub fn is_starting_plains_active(state: &State) -> bool {
 
 /// Returns the retreat cost reduction for Peculiar Plaza.
 /// Peculiar Plaza: "The Retreat Cost of each [P] Pokemon in play (both yours and your opponent's) is 2 less."
-pub fn get_peculiar_plaza_retreat_reduction(state: &State, energy_type: EnergyType) -> u8 {
-    if energy_type == EnergyType::Psychic && has_stadium(state, CardId::B2155PeculiarPlaza) {
+/// `is_psychic` is membership in the Pokémon's *in-play* type set, so a dual-type [P] Pokémon
+/// gets the reduction (once — the caller asks a single yes/no question).
+pub fn get_peculiar_plaza_retreat_reduction(state: &State, is_psychic: bool) -> u8 {
+    if is_psychic && has_stadium(state, CardId::B2155PeculiarPlaza) {
         2
     } else {
         0
@@ -142,15 +150,14 @@ pub fn is_arena_of_antiquity_active(state: &State) -> bool {
 
 /// Returns the damage bonus for Arena of Antiquity.
 /// Arena of Antiquity: "Attacks used by each [F] Pokémon in play (both yours and your opponent's) do +20 damage to the opponent's Active Pokémon ex."
+/// `attacker_is_fighting` is membership in the attacker's *in-play* type set, so a dual-type [F]
+/// attacker gets the bonus (once).
 pub fn get_arena_of_antiquity_damage_bonus(
     state: &State,
-    attacker_energy_type: EnergyType,
+    attacker_is_fighting: bool,
     target_is_ex: bool,
 ) -> u32 {
-    if attacker_energy_type == EnergyType::Fighting
-        && target_is_ex
-        && is_arena_of_antiquity_active(state)
-    {
+    if attacker_is_fighting && target_is_ex && is_arena_of_antiquity_active(state) {
         20
     } else {
         0
@@ -169,10 +176,9 @@ pub fn can_use_fragrant_forest(state: &State, player: usize) -> bool {
     if state.has_used_stadium[player] {
         return false;
     }
-    state.decks[player]
-        .cards
-        .iter()
-        .any(|card| matches!(card, Card::Pokemon(p) if p.stage == 0 && p.energy_type == EnergyType::Grass))
+    state.decks[player].cards.iter().any(
+        |card| matches!(card, Card::Pokemon(p) if p.stage == 0 && p.is_type(EnergyType::Grass)),
+    )
 }
 
 pub fn is_area_zero_active(state: &State) -> bool {
@@ -226,4 +232,26 @@ pub fn can_use_kids_room(state: &State, player: usize) -> bool {
         .cards
         .iter()
         .any(|card| matches!(card, Card::Trainer(t) if t.trainer_card_type == TrainerType::Tool))
+}
+
+pub fn is_arcade_active(state: &State) -> bool {
+    has_stadium(state, CardId::B4a072Arcade)
+}
+
+/// Returns true if the player can use Arcade's effect (stadium is active, not used this turn,
+/// and the player has room in hand to benefit from drawing up to 7 cards).
+pub fn can_use_arcade(state: &State, player: usize) -> bool {
+    is_arcade_active(state) && !state.has_used_stadium[player] && state.hands[player].len() < 7
+}
+
+pub fn is_abandoned_station_active(state: &State) -> bool {
+    has_stadium(state, CardId::C1131AbandonedStation)
+}
+
+/// Returns true if the player can use Abandoned Station's effect (stadium is active, not used
+/// this turn, and the deck has a card to draw).
+pub fn can_use_abandoned_station(state: &State, player: usize) -> bool {
+    is_abandoned_station_active(state)
+        && !state.has_used_stadium[player]
+        && !state.decks[player].cards.is_empty()
 }

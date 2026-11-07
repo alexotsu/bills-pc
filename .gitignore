@@ -9,3 +9,10 @@ client_secret_884321205448-2mt19m2asnlbk4e1lskr8qth3gdnnp9k.apps.googleuserconte
 __pycache__/
 *.so
 *.pyd
+
+# Replays written by --replay-dir
+replays/
+
+# Viewer (viewer/)
+viewer/node_modules
+viewer/dist

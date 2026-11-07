@@ -7,8 +7,8 @@ use crate::{
     },
     models::{Card, EnergyType, TrainerType},
     stadiums::{
-        is_area_zero_active, is_fragrant_forest_active, is_kids_room_active, is_mesagoza_active,
-        is_rainbow_cave_active,
+        is_abandoned_station_active, is_arcade_active, is_area_zero_active,
+        is_fragrant_forest_active, is_kids_room_active, is_mesagoza_active, is_rainbow_cave_active,
     },
     State,
 };
@@ -37,7 +37,27 @@ pub(crate) fn forecast_use_stadium(state: &State, acting_player: usize) -> Outco
     if is_rainbow_cave_active(state) {
         return forecast_rainbow_cave_effect();
     }
+    if is_arcade_active(state) {
+        return forecast_arcade_effect();
+    }
+    if is_abandoned_station_active(state) {
+        return forecast_abandoned_station_effect();
+    }
     Outcomes::single_fn(|_, _, _| {})
+}
+
+/// Abandoned Station: once during each player's turn, that player may flip a coin. If heads,
+/// that player draws a card.
+fn forecast_abandoned_station_effect() -> Outcomes {
+    Outcomes::binary_coin(
+        Box::new(|_, state, action| {
+            state.has_used_stadium[action.actor] = true;
+            state.maybe_draw_card(action.actor);
+        }),
+        Box::new(|_, state, action| {
+            state.has_used_stadium[action.actor] = true;
+        }),
+    )
 }
 
 /// Rainbow Cave: Once during each player's turn, that player may discard the Energy that has been
@@ -133,6 +153,25 @@ fn forecast_kids_room_effect(state: &State, acting_player: usize) -> Outcomes {
                 .move_generation_stack
                 .push((action.actor, choices.clone()));
         }
+    })
+}
+
+/// Arcade: once during each player's turn, that player may flip 3 coins. If all of them are
+/// heads, that player draws cards until they have 7 cards in their hand.
+fn forecast_arcade_effect() -> Outcomes {
+    Outcomes::binomial_by_heads(3, |heads| {
+        Box::new(move |_, state, action| {
+            state.has_used_stadium[action.actor] = true;
+            if heads == 3 {
+                while state.hands[action.actor].len() < 7 {
+                    let hand_size_before = state.hands[action.actor].len();
+                    state.maybe_draw_card(action.actor);
+                    if state.hands[action.actor].len() == hand_size_before {
+                        break; // Deck is empty, nothing left to draw
+                    }
+                }
+            }
+        })
     })
 }
 

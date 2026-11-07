@@ -204,9 +204,11 @@ fn test_giratina_ex_broken_space_bellow_attaches_energy_and_offers_end_turn() {
     );
 
     let (_actor, actions) = state.generate_possible_actions();
-    assert!(actions
-        .iter()
-        .any(|action| matches!(action.action, SimpleAction::EndTurn)));
+    assert_eq!(actions.len(), 1);
+    assert!(matches!(actions[0].action, SimpleAction::EndTurn));
+
+    game.apply_action(&actions[0]);
+    assert_eq!(game.get_state_clone().current_player, 1);
 }
 
 #[test]
@@ -669,6 +671,47 @@ fn test_reuniclus_infinite_increase_raises_effective_hp_on_attach() {
     });
 
     assert_eq!(game.get_state_clone().get_active(0).get_remaining_hp(), 100);
+}
+
+#[test]
+fn test_serperior_regal_bloom_raises_effective_hp_on_attach() {
+    let mut game = get_test_game_with_board(
+        vec![PlayedCard::from_id(CardId::B4a005Serperior)],
+        vec![PlayedCard::from_id(CardId::A1001Bulbasaur)],
+    );
+
+    game.apply_action(&Action {
+        actor: 0,
+        action: SimpleAction::Attach {
+            attachments: vec![(1, EnergyType::Grass, 0)],
+            is_turn_energy: true,
+        },
+        is_stack: false,
+    });
+
+    assert_eq!(game.get_state_clone().get_active(0).get_remaining_hp(), 130);
+}
+
+/// A benched Serperior with Jungle Totem doubles the [G] Energy that a second, Active
+/// Serperior with Regal Bloom sees: 3 attached [G] Energy count as 6, for +180 HP.
+#[test]
+fn test_serperior_jungle_totem_doubles_grass_energy_for_serperior_regal_bloom_hp() {
+    let game = get_test_game_with_board(
+        vec![
+            PlayedCard::from_id(CardId::B4a005Serperior).with_energy(vec![
+                EnergyType::Grass,
+                EnergyType::Grass,
+                EnergyType::Grass,
+            ]),
+            PlayedCard::from_id(CardId::A1a006Serperior),
+        ],
+        vec![PlayedCard::from_id(CardId::A1001Bulbasaur)],
+    );
+
+    assert_eq!(
+        game.get_state_clone().get_active(0).get_remaining_hp(),
+        100 + 180
+    );
 }
 
 #[test]

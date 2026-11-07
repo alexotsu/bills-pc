@@ -118,7 +118,10 @@ to see what is missing from the specified card.
   cargo run --bin search "Rare Candy"
   ```
 
-- Copy the ids of cards to implement (including full art versions) in the given JSON.
+- Note the id of the **first printing** only. Trainer logic is keyed by effect text through
+  `canonical_trainer_id` (`src/trainer_identity.rs`), so every full-art version and every later
+  reprint of the card resolves to that first printing and needs no code of its own. Listing a
+  reprint's id in a match arm is unnecessary and `rustc` will flag it as unreachable.
 - Implement the "move generation" logic.
   - In `move_generation_trainer.rs` implement the switch branch. Its often the case the Trainer/Support can always be played, so just add to this case in the switch.
 - Implement the "apply action" logic.
@@ -168,6 +171,17 @@ to see what is missing from the specified card.
   - Match the abstraction level of `test_raikou_rocky_helmet_promotion_order` in `tests/tools/raikou_rocky_helmet_order_test.rs`.
   - Exercise the `Game` public API, especially `game.apply_action(...)` and the resulting public game state.
 
+## Multiple Cards Requested At Once
+
+When the user asks to implement several cards in the same request (e.g. "implement Serperior, Delphox, Tinkaton, and Weezing ex"):
+
+- Treat this as a single PR containing one commit per card, all on the same feature branch.
+- Implement the cards one at a time, fully finishing each one (tests written first, implementation, targeted tests passing, `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`) before moving to the next.
+- Commit each card's changes separately, right after finishing it, with a commit message scoped to that one card (e.g. "Implement Serperior's Giant Leaves attack"). Do not bundle multiple cards' changes into a single commit, and do not wait until all cards are done to start committing.
+- If two requested cards touch the same generated/shared file (e.g. `attack_ids.rs`, `effect_mechanic_map.rs`, `effect_ability_mechanic_map.rs`), that's expected — just make sure each commit only contains the hunks relevant to the card it's for when practical, or note in the commit message that shared infra was touched.
+- After all cards are implemented, run the full relevant test suites (per-area, as described in Appendix) once more before pushing, then push the branch with all commits.
+- Only open/update a single PR for the whole batch, not one PR per card.
+
 ## Appendix
 
 ### Testing Your Implementation
@@ -185,9 +199,9 @@ Review the results to ensure the games complete without errors.
 Run the targeted automated checks for the code you touched:
 
 ```bash
-cargo test --features test-utils --test pokemon
-cargo test --features test-utils --test tools
-cargo test --features test-utils --test stadiums
+cargo test --features test-utils --test cards
+cargo test --features test-utils --test cards -- tools::
+cargo test --features test-utils --test cards -- stadiums::
 cargo test --features test-utils --test mechanics
 ```
 

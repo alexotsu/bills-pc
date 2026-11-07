@@ -25,14 +25,12 @@ where
         .expect("expected action to be available")
 }
 
-/// Regression test for a latent bug fixed alongside the interactive control plane:
-/// `generate_possible_actions` used to check `turn_count == 0` (setup phase) before
-/// checking `move_generation_stack`, so a forced follow-up decision pushed during setup
-/// (e.g. Miraidon ex's Legendary Drive switch-to-active offer, triggered by benching it)
-/// was silently dropped. It only resurfaced later, once turn_count reached 1, as a phantom
-/// decision ahead of real turn-1 play.
+/// Miraidon ex's Legendary Drive reads "Once during your turn, when you put this Pokémon
+/// from your hand onto your Bench...", so benching it during setup (before any turn exists)
+/// must not offer it at all — and, since nothing was queued, it must not resurface later
+/// as a phantom decision once turn_count reaches 1 either.
 #[test]
-fn test_legendary_drive_offered_during_setup_phase() {
+fn test_legendary_drive_not_offered_during_setup_phase() {
     let players = init_random_players();
     let mut game = Game::new(players, 0);
 
@@ -51,30 +49,27 @@ fn test_legendary_drive_offered_during_setup_phase() {
     let place_active = find_action(&game, |a| matches!(a.action, SimpleAction::Place(_, 0)));
     game.apply_action(&place_active);
 
-    // Bench Miraidon ex (Legendary Drive triggers "on bench from hand").
+    // Bench Miraidon ex (Legendary Drive's "on bench from hand" hook fires, but must no-op
+    // during setup).
     let place_miraidon = find_action(
         &game,
         |a| matches!(a.action, SimpleAction::Place(ref c, pos) if pos != 0 && c.get_name() == "Miraidon ex"),
     );
     game.apply_action(&place_miraidon);
 
-    // Still turn_count == 0: the switch-to-active choice must be surfaced immediately,
-    // not dropped until turn 1.
     let state = game.get_state_clone();
     assert_eq!(state.turn_count, 0);
+    assert!(
+        state.move_generation_stack.is_empty(),
+        "Legendary Drive must not queue a decision during setup"
+    );
     let (_actor, actions) = state.generate_possible_actions();
     assert!(
-        actions
+        !actions
             .iter()
             .any(|a| matches!(a.action, SimpleAction::UseAbility { .. })),
-        "Legendary Drive should be offered immediately after benching during setup, got: {:?}",
+        "Legendary Drive should not be offered during setup, got: {:?}",
         actions.iter().map(|a| &a.action).collect::<Vec<_>>()
-    );
-    assert!(
-        actions
-            .iter()
-            .any(|a| matches!(a.action, SimpleAction::Noop)),
-        "Noop should be offered alongside Legendary Drive"
     );
 }
 
